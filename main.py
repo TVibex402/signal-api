@@ -12,10 +12,10 @@ app = Flask(__name__)
 
 # Ví nhận tiền (địa chỉ công khai)
 SVM_ADDRESS = "GyRZxTMEKS68r23jmTA4Mc8cmLQEFVQG2Ekh5AXrGtEH"
-SVM_NETWORK: Network = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"  # Solana Devnet
+SVM_NETWORK: Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"  # Solana Mainnet
 
 facilitator = HTTPFacilitatorClientSync(
-    FacilitatorConfig(url="https://x402.org/facilitator")
+FacilitatorConfig(url="https://facilitator.payai.network")
 )
 server = x402ResourceServerSync(facilitator)
 server.register(SVM_NETWORK, ExactSvmServerScheme())

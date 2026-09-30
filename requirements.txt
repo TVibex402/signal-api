@@ -3,3 +3,4 @@ requests
 gunicorn
 x402[flask]
 x402[svm]
+httpx

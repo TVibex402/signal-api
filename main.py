@@ -1,3 +1,5 @@
+import re
+
 import requests
 from flask import Flask, Response, jsonify, request
 
@@ -31,58 +33,105 @@ routes = {
             ),
         ],
         mime_type="application/json",
-        description="Token signal data: price, liquidity, volume, buys/sells",
+        description="TVibex402: Solana token data (price, liquidity, volume, buys/sells)",
     ),
 }
 
 payment_middleware(app, routes=routes, server=server)
+
+MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 LANDING_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>signal-api: pay-per-call Solana token data</title>
+<title>TVibex402 | Pay-per-call Solana token data</title>
+<meta name="description" content="Pay-per-call Solana token data for AI agents and bots. 0.01 USDC per call via x402. No signup, no API key.">
+<meta property="og:title" content="TVibex402 | Pay-per-call Solana token data">
+<meta property="og:description" content="Price, liquidity, volume and buy/sell counts for any Solana token. 0.01 USDC per call via x402.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="TVibex402 | Pay-per-call Solana token data">
+<meta name="twitter:description" content="Price, liquidity, volume and buy/sell counts for any Solana token. 0.01 USDC per call via x402.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
 <style>
-  body{font-family:system-ui,sans-serif;max-width:640px;margin:0 auto;padding:24px;
-       line-height:1.55;color:#1a1a1a;background:#fafafa}
-  h1{font-size:1.6rem;margin-bottom:.2rem}
-  h2{font-size:1.15rem;margin-top:1.8rem}
-  code,pre{background:#eee;border-radius:6px;font-size:.85rem}
-  code{padding:2px 5px}
-  pre{padding:12px;overflow-x:auto}
-  .price{display:inline-block;background:#1a1a1a;color:#fff;padding:4px 10px;
-         border-radius:999px;font-size:.9rem}
-  small{color:#555}
+:root{--bg:#0b0f14;--card:#121923;--line:#223042;--text:#e6edf3;--muted:#8b9bb0;--a:#14f195;--b:#9945ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.55}
+.wrap{max-width:720px;margin:0 auto;padding:28px 18px 60px}
+.brand{font-size:2.3rem;font-weight:800;margin:0;letter-spacing:-.5px;background:linear-gradient(90deg,var(--b),var(--a));-webkit-background-clip:text;background-clip:text;color:transparent}
+.tag{color:var(--muted);margin:.4rem 0 1rem;font-size:1.02rem}
+.pills{display:flex;gap:8px;flex-wrap:wrap}
+.pill{border:1px solid var(--line);background:var(--card);padding:5px 12px;border-radius:999px;font-size:.82rem}
+.pill b{color:var(--a)}
+h2{font-size:1.1rem;margin:2.2rem 0 .7rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid .card{padding:12px;font-size:.92rem}
+.btn{display:inline-block;padding:11px 16px;border-radius:10px;font-weight:600;text-decoration:none;border:0;cursor:pointer;font-size:.95rem}
+.btn.primary{background:linear-gradient(90deg,var(--b),var(--a));color:#06110b}
+.btn.ghost{border:1px solid var(--line);color:var(--text);background:transparent}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:1.1rem 0 0}
+form{display:flex;gap:8px;flex-wrap:wrap;margin:.6rem 0}
+input[type=text]{flex:1 1 220px;min-width:0;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:#0e141c;color:var(--text);font-size:.9rem}
+pre{background:#0e141c;border:1px solid var(--line);border-radius:10px;padding:12px;overflow-x:auto;font-size:.8rem;margin:.5rem 0}
+code{font-family:ui-monospace,Menlo,Consolas,monospace}
+ol{padding-left:1.2rem;margin:.4rem 0}
+li{margin:.4rem 0}
+.muted{color:var(--muted);font-size:.85rem}
+a{color:var(--a)}
 </style>
 </head>
 <body>
-<h1>signal-api</h1>
-<p>Pay-per-call market data for Solana tokens, built for AI agents and bots.</p>
-<p><span class="price">$0.01 USDC per call</span></p>
+<div class="wrap">
+
+<h1 class="brand">TVibex402</h1>
+<p class="tag">Pay-per-call Solana token data, built for AI agents and bots.</p>
+<div class="pills">
+  <span class="pill"><b>$0.01</b> USDC per call</span>
+  <span class="pill">Solana mainnet</span>
+  <span class="pill">x402 protocol</span>
+  <span class="pill">No signup, no API key</span>
+</div>
+<div class="row">
+  <a class="btn primary" href="/demo">View free sample</a>
+  <a class="btn ghost" href="#how">How it works</a>
+</div>
+
+<h2>Try it</h2>
+<div class="card">
+  <p style="margin:0 0 .4rem">Paste any Solana token address:</p>
+  <form action="/signal" method="get">
+    <input type="text" name="mint" placeholder="Token address (mint)" required minlength="32" maxlength="44" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="btn primary" type="submit">Get data ($0.01)</button>
+  </form>
+  <p class="muted" style="margin:.4rem 0 0">You will be asked to connect a Solana wallet and pay 0.01 USDC (real money, mainnet). Want to see the format first? Open the free sample above.</p>
+</div>
 
 <h2>What you get</h2>
-<p>For any Solana token address, one call returns:</p>
-<ul>
-  <li>Token symbol and USD price</li>
-  <li>Liquidity in USD (largest pool)</li>
-  <li>Volume over 5 minutes and 1 hour</li>
-  <li>Buy and sell transaction counts over 5 minutes</li>
-</ul>
+<div class="grid">
+  <div class="card">Token symbol and USD price</div>
+  <div class="card">Liquidity in USD (largest pool)</div>
+  <div class="card">Volume over 5 minutes and 1 hour</div>
+  <div class="card">Buy and sell counts over 5 minutes</div>
+</div>
 
-<h2>How to call it</h2>
-<pre>GET https://signal-api-24q4.onrender.com/signal?mint=TOKEN_ADDRESS</pre>
-<p>Example (wrapped SOL):</p>
-<pre>https://signal-api-24q4.onrender.com/signal?mint=So11111111111111111111111111111111111111112</pre>
+<h2 id="how">How it works</h2>
+<div class="card">
+<ol>
+  <li>Call <code>/signal?mint=TOKEN_ADDRESS</code>.</li>
+  <li>An unpaid request gets <code>402 Payment Required</code> with payment instructions.</li>
+  <li>An x402-compatible client pays 0.01 USDC on Solana and retries automatically, then receives the data.</li>
+</ol>
+</div>
 
-<h2>How payment works</h2>
-<p>This API uses the <b>x402</b> protocol. An unpaid request gets an
-HTTP <code>402 Payment Required</code> response with payment instructions.
-An x402-compatible client pays 0.01 USDC on Solana mainnet and retries the
-request automatically, then receives the data. No account or API key needed.</p>
+<h2>Call it</h2>
+<pre><code>GET https://signal-api-24q4.onrender.com/signal?mint=TOKEN_ADDRESS</code></pre>
+<p class="muted">Example (wrapped SOL):</p>
+<pre><code>https://signal-api-24q4.onrender.com/signal?mint=So11111111111111111111111111111111111111112</code></pre>
 
-<h2>Example response</h2>
-<pre>{
+<h2>Sample response</h2>
+<pre><code>{
   "token": "SOL",
   "price_usd": "119.54",
   "liquidity_usd": 37607261.15,
@@ -90,16 +139,18 @@ request automatically, then receives the data. No account or API key needed.</p>
   "volume_1h": 458039.23,
   "buys_5m": 468,
   "sells_5m": 365
-}</pre>
+}</code></pre>
 
 <h2>Notes</h2>
-<ul>
+<ul class="muted">
   <li>Data comes from DexScreener and may be delayed or inaccurate.</li>
   <li>For information only. Not financial advice.</li>
-  <li>Errors (token not found, upstream failure) return an error status, so a failed call should not be charged.</li>
+  <li>Errors (invalid address, token not found, upstream failure) return an error status, so a failed call should not be charged.</li>
   <li>Hosted on a free tier: the first request after a quiet period can take up to about a minute.</li>
 </ul>
-<p><small>Experimental project. Payments are real USDC on Solana mainnet.</small></p>
+<p class="muted">TVibex402 is an experimental project. Payments are real USDC on Solana mainnet.</p>
+
+</div>
 </body>
 </html>"""
 
@@ -109,11 +160,29 @@ def home():
     return Response(LANDING_HTML, mimetype="text/html")
 
 
+@app.route("/demo")
+def demo():
+    # Free, static sample. Does not call DexScreener.
+    return jsonify(
+        sample=True,
+        note="Static sample data. The paid endpoint /signal returns live data.",
+        token="SOL",
+        price_usd="119.54",
+        liquidity_usd=37607261.15,
+        volume_5m=31690.17,
+        volume_1h=458039.23,
+        buys_5m=468,
+        sells_5m=365,
+    )
+
+
 @app.route("/signal")
 def signal():
     mint = request.args.get("mint", "").strip()
     if not mint:
         return jsonify(error="Missing mint parameter"), 400
+    if not MINT_RE.match(mint):
+        return jsonify(error="Invalid token address"), 400
 
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"

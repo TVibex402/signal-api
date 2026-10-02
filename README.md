@@ -12,3 +12,4 @@ GET / → Homepage
 GET /signal?mint=TOKEN_ADDRESS → Live data
 GET /demo → Sample data
 GET /health → Health check
+curl "http://127.0.0.1:8080/signal?mint=So11111111111111111111111111111111111111112"

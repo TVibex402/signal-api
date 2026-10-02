@@ -39,7 +39,7 @@ if not FREE_MODE:
                 ),
             ],
             mime_type="application/json",
-            description="TVibex402: Solana token data (price, liquidity, volume, buys/sells)",
+            description="TVibex402: Solana token data and signals",
         ),
     }
     payment_middleware(app, routes=routes, server=server)
@@ -47,6 +47,95 @@ if not FREE_MODE:
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 CACHE = {}
 CACHE_TTL = 10  # seconds
+
+# Heuristic thresholds for flags (starting values, tune them)
+SPIKE_RATIO = 3.0          # 5m volume vs hourly average pace
+MIN_SPIKE_VOLUME = 1000    # ignore tiny volumes (USD, 5m)
+BUY_PRESSURE_HIGH = 0.65   # share of buys in 5m
+MIN_TXNS = 20              # min 5m transactions for buy/sell flags
+LOW_LIQ_USD = 10000        # liquidity below this = low_liquidity
+NEW_PAIR_MIN = 60          # pair younger than this (minutes) = new_pair
+HIGH_TURNOVER = 3.0        # 1h volume / liquidity
+
+
+def num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def div(a, b):
+    if a is None or not b:
+        return None
+    return a / b
+
+
+def rnd(x, n=2):
+    return None if x is None else round(x, n)
+
+
+def build_payload(p):
+    vol = p.get("volume") or {}
+    tx = p.get("txns") or {}
+    chg = p.get("priceChange") or {}
+
+    liq = num((p.get("liquidity") or {}).get("usd"))
+    v5, v1, v6 = num(vol.get("m5")), num(vol.get("h1")), num(vol.get("h6"))
+
+    b5 = (tx.get("m5") or {}).get("buys") or 0
+    s5 = (tx.get("m5") or {}).get("sells") or 0
+    b1 = (tx.get("h1") or {}).get("buys") or 0
+    s1 = (tx.get("h1") or {}).get("sells") or 0
+
+    spike_5m = div(v5, (v1 / 12) if v1 else None)
+    buy_pressure_5m = div(b5, b5 + s5)
+    turnover_1h = div(v1, liq)
+
+    created = num(p.get("pairCreatedAt"))
+    age_min = (time.time() * 1000 - created) / 60000 if created else None
+
+    flags = []
+    if spike_5m is not None and spike_5m >= SPIKE_RATIO and (v5 or 0) >= MIN_SPIKE_VOLUME:
+        flags.append("volume_spike")
+    if buy_pressure_5m is not None and (b5 + s5) >= MIN_TXNS:
+        if buy_pressure_5m >= BUY_PRESSURE_HIGH:
+            flags.append("heavy_buying")
+        elif buy_pressure_5m <= 1 - BUY_PRESSURE_HIGH:
+            flags.append("heavy_selling")
+    if liq is not None and liq < LOW_LIQ_USD:
+        flags.append("low_liquidity")
+    if age_min is not None and age_min < NEW_PAIR_MIN:
+        flags.append("new_pair")
+    if turnover_1h is not None and turnover_1h >= HIGH_TURNOVER:
+        flags.append("high_turnover")
+
+    return {
+        "token": (p.get("baseToken") or {}).get("symbol"),
+        "price_usd": p.get("priceUsd"),
+        "price_change_pct": {
+            "5m": chg.get("m5"),
+            "1h": chg.get("h1"),
+            "6h": chg.get("h6"),
+            "24h": chg.get("h24"),
+        },
+        "liquidity_usd": liq,
+        "market_cap_usd": p.get("marketCap"),
+        "fdv_usd": p.get("fdv"),
+        "pair_age_minutes": rnd(age_min, 1),
+        "volume_5m": v5,
+        "volume_1h": v1,
+        "volume_6h": v6,
+        "buys_5m": b5,
+        "sells_5m": s5,
+        "buys_1h": b1,
+        "sells_1h": s1,
+        "buy_pressure_5m": rnd(buy_pressure_5m, 3),
+        "volume_spike_ratio_5m": rnd(spike_5m, 2),
+        "turnover_1h": rnd(turnover_1h, 2),
+        "flags": flags,
+    }
+
 
 LANDING_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -112,11 +201,14 @@ a{color:var(--a)}
 
 <h2>What you get</h2>
 <div class="grid">
-  <div class="card">Token symbol and USD price</div>
-  <div class="card">Liquidity in USD (largest pool)</div>
-  <div class="card">Volume over 5 minutes and 1 hour</div>
-  <div class="card">Buy and sell counts over 5 minutes</div>
+  <div class="card">Price, market cap and FDV</div>
+  <div class="card">Price change: 5m, 1h, 6h, 24h</div>
+  <div class="card">Liquidity (largest pool) and pair age</div>
+  <div class="card">Volume: 5m, 1h, 6h</div>
+  <div class="card">Buy/sell counts and buy pressure</div>
+  <div class="card">Volume spike ratio and turnover</div>
 </div>
+<p class="muted">Plus simple flags: volume_spike, heavy_buying, heavy_selling, low_liquidity, new_pair, high_turnover.</p>
 
 <h2 id="how">How it works</h2>
 <div class="card">__HOW__</div>
@@ -130,16 +222,22 @@ a{color:var(--a)}
 <pre><code>{
   "token": "SOL",
   "price_usd": "119.54",
+  "price_change_pct": {"5m": 0.1, "1h": -0.4, "6h": 1.2, "24h": 2.8},
   "liquidity_usd": 37607261.15,
   "volume_5m": 31690.17,
   "volume_1h": 458039.23,
   "buys_5m": 468,
-  "sells_5m": 365
+  "sells_5m": 365,
+  "buy_pressure_5m": 0.562,
+  "volume_spike_ratio_5m": 0.83,
+  "turnover_1h": 0.01,
+  "flags": []
 }</code></pre>
 
 <h2>Notes</h2>
 <ul class="muted">
   <li>Data comes from DexScreener and may be delayed or inaccurate.</li>
+  <li>Flags are simple heuristics that describe current activity. They are not buy or sell recommendations.</li>
   <li>For information only. Not financial advice.</li>
   <li>Hosted on a free tier: the first request after a quiet period can take up to about a minute.</li>
   __EXTRA__
@@ -153,8 +251,8 @@ a{color:var(--a)}
 if FREE_MODE:
     COPY = {
         "__TITLE__": "TVibex402 | Solana token data API",
-        "__DESC__": "Free Solana token data API for AI agents and bots: price, liquidity, volume and buy/sell counts.",
-        "__TAG__": "Solana token data, built for AI agents and bots.",
+        "__DESC__": "Free Solana token data API for AI agents and bots: price, liquidity, volume, buy pressure and simple signals.",
+        "__TAG__": "Solana token data and signals, built for AI agents and bots.",
         "__PILLS__": '<span class="pill"><b>Free</b> during beta</span><span class="pill">Solana tokens</span><span class="pill">No signup, no API key</span>',
         "__BTN__": "Get data (free)",
         "__TRYNOTE__": "Free during beta. No wallet or signup needed. Results come back as JSON.",
@@ -165,8 +263,8 @@ if FREE_MODE:
 else:
     COPY = {
         "__TITLE__": "TVibex402 | Pay-per-call Solana token data",
-        "__DESC__": "Pay-per-call Solana token data for AI agents and bots. 0.01 USDC per call via x402. No signup, no API key.",
-        "__TAG__": "Pay-per-call Solana token data, built for AI agents and bots.",
+        "__DESC__": "Pay-per-call Solana token data and signals for AI agents and bots. 0.01 USDC per call via x402. No signup, no API key.",
+        "__TAG__": "Pay-per-call Solana token data and signals, built for AI agents and bots.",
         "__PILLS__": '<span class="pill"><b>$0.01</b> USDC per call</span><span class="pill">Solana mainnet</span><span class="pill">x402 protocol</span><span class="pill">No signup, no API key</span>',
         "__BTN__": "Get data ($0.01)",
         "__TRYNOTE__": "You will be asked to connect a Solana wallet and pay 0.01 USDC (real money, mainnet). Want to see the format first? Open the free sample above.",
@@ -193,11 +291,22 @@ def demo():
         note="Static sample data. /signal returns live data.",
         token="SOL",
         price_usd="119.54",
+        price_change_pct={"5m": 0.1, "1h": -0.4, "6h": 1.2, "24h": 2.8},
         liquidity_usd=37607261.15,
+        market_cap_usd=None,
+        fdv_usd=None,
+        pair_age_minutes=None,
         volume_5m=31690.17,
         volume_1h=458039.23,
+        volume_6h=None,
         buys_5m=468,
         sells_5m=365,
+        buys_1h=None,
+        sells_1h=None,
+        buy_pressure_5m=0.562,
+        volume_spike_ratio_5m=0.83,
+        turnover_1h=0.01,
+        flags=[],
     )
 
 
@@ -225,17 +334,8 @@ def signal():
         return jsonify(error="Token not found"), 404
 
     p = max(pairs, key=lambda x: (x.get("liquidity") or {}).get("usd") or 0)
-    txns5 = (p.get("txns") or {}).get("m5") or {}
+    payload = build_payload(p)
 
-    payload = {
-        "token": p["baseToken"]["symbol"],
-        "price_usd": p.get("priceUsd"),
-        "liquidity_usd": (p.get("liquidity") or {}).get("usd"),
-        "volume_5m": (p.get("volume") or {}).get("m5"),
-        "volume_1h": (p.get("volume") or {}).get("h1"),
-        "buys_5m": txns5.get("buys"),
-        "sells_5m": txns5.get("sells"),
-    }
     if len(CACHE) > 500:
         CACHE.clear()
     CACHE[mint] = (now, payload)

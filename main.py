@@ -7,11 +7,7 @@ import time
 from collections import OrderedDict
 import threading
 
-app = FastAPI(
-    title="TVibex402",
-    description="Free Solana token data API for AI agents & bots",
-    version="1.2.0",
-)
+app = FastAPI(title="TVibex402", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,12 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==================== CACHE ====================
 CACHE_TTL = 30
 CACHE_MAX = 200
 _cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _lock = threading.Lock()
-
 
 def cache_get(key: str) -> Optional[dict]:
     with _lock:
@@ -39,7 +33,6 @@ def cache_get(key: str) -> Optional[dict]:
         _cache.move_to_end(key)
         return data
 
-
 def cache_set(key: str, data: dict):
     with _lock:
         if key in _cache:
@@ -48,17 +41,13 @@ def cache_set(key: str, data: dict):
         while len(_cache) > CACHE_MAX:
             _cache.popitem(last=False)
 
-
-# ==================== DEXSCREENER ====================
 DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
-
 
 def pick_best_pair(pairs: list) -> Optional[dict]:
     sol = [p for p in pairs if p.get("chainId") == "solana"]
     if not sol:
         return None
     return max(sol, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
-
 
 def compute_signals(pair: dict) -> Dict[str, Any]:
     base = pair.get("baseToken") or {}
@@ -71,37 +60,30 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
     buys_5m = int(m5.get("buys") or 0)
     sells_5m = int(m5.get("sells") or 0)
     total_5m = buys_5m + sells_5m
-
     buy_pressure = round(buys_5m / total_5m, 3) if total_5m > 0 else None
 
     vol_5m = float(volume.get("m5") or 0)
     vol_1h = float(volume.get("h1") or 0)
     vol_6h = float(volume.get("h6") or 0)
-
     avg_5m = vol_1h / 12 if vol_1h > 0 else 0
     volume_spike = round(vol_5m / avg_5m, 2) if avg_5m > 0 else None
-
     turnover = round(vol_1h / liquidity_usd, 3) if liquidity_usd > 0 else None
 
     flags = []
-
     if volume_spike is not None:
         if volume_spike >= 5.0:
             flags.append("extreme_volume_spike")
         elif volume_spike >= 3.0:
             flags.append("volume_spike")
-
     if buy_pressure is not None:
         if buy_pressure >= 0.75:
             flags.append("heavy_buying")
         elif buy_pressure <= 0.25:
             flags.append("heavy_selling")
-
-    if liquidity_usd < 20_000:
+    if liquidity_usd < 20000:
         flags.append("very_low_liquidity")
-    elif liquidity_usd < 50_000:
+    elif liquidity_usd < 50000:
         flags.append("low_liquidity")
-
     if turnover is not None:
         if turnover >= 3.0:
             flags.append("extreme_turnover")
@@ -111,7 +93,7 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
     created = pair.get("pairCreatedAt")
     age_minutes = None
     if created:
-        age_minutes = int((time.time() * 1000 - created) / 60_000)
+        age_minutes = int((time.time() * 1000 - created) / 60000)
         if age_minutes < 60:
             flags.append("brand_new_pair")
         elif age_minutes < 360:
@@ -124,7 +106,6 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
         flags.append("strong_momentum")
     if (pc.get("m5") or 0) < -15 and (pc.get("h1") or 0) < -25:
         flags.append("dump_risk")
-
     if total_5m >= 300:
         flags.append("high_activity")
 
@@ -156,54 +137,148 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
         "flags": flags,
     }
 
-
-# ==================== ROUTES ====================
-
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return """
-<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TVibex402 | Solana Token Signal API</title>
-  <style>
-    :root {
-      --bg: #070b12;
-      --card: rgba(18, 25, 35, 0.75);
-      --line: rgba(34, 48, 66, 0.8);
-      --text: #e8eef6;
-      --muted: #8b9bb4;
-      --a: #14f195;
-      --b: #9945ff;
-      --danger: #ff4d6d;
-      --warn: #ffb020;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: system-ui, -apple-system, sans-serif;
-      line-height: 1.55;
-      min-height: 100vh;
-      background-image: 
-        radial-gradient(ellipse 80% 50% at 20% -10%, rgba(153, 69, 255, 0.18), transparent),
-        radial-gradient(ellipse 60% 40% at 90% 10%, rgba(20, 241, 149, 0.12), transparent);
-    }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 36px 18px 80px; }
-    .brand {
-      font-size: 2.6rem; font-weight: 800; letter-spacing: -1px;
-      background: linear-gradient(120deg, var(--b), var(--a));
-      -webkit-background-clip: text; background-clip: text; color: transparent;
-    }
-    .tag { color: var(--muted); margin: 6px 0 28px; font-size: 1.05rem; }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 22px;
-      backdrop-filter: blur(12px);
-      margin-bottom: 20px;
-    }
-    h2 { font-size: 1.15rem; margin:
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TVibex402</title>
+<style>
+:root{--bg:#070b12;--card:rgba(18,25,35,.8);--line:rgba(34,48,66,.8);--text:#e8eef6;--muted:#8b9bb4;--a:#14f195;--b:#9945ff;--danger:#ff4d6d;--warn:#ffb020}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;line-height:1.55;min-height:100vh;background-image:radial-gradient(ellipse 80% 50% at 20% -10%,rgba(153,69,255,.18),transparent),radial-gradient(ellipse 60% 40% at 90% 10%,rgba(20,241,149,.12),transparent)}
+.wrap{max-width:720px;margin:0 auto;padding:36px 18px 80px}
+.brand{font-size:2.5rem;font-weight:800;background:linear-gradient(120deg,var(--b),var(--a));-webkit-background-clip:text;background-clip:text;color:transparent}
+.tag{color:var(--muted);margin:6px 0 28px;font-size:1.05rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:20px}
+h2{font-size:1.15rem;margin:28px 0 12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid .item{background:rgba(13,17,23,.6);border:1px solid var(--line);border-radius:12px;padding:14px 12px;font-size:.9rem;color:var(--muted)}
+input[type=text]{width:100%;padding:14px 16px;border-radius:12px;border:1px solid var(--line);background:rgba(13,17,23,.8);color:var(--text);font-size:.95rem;outline:none}
+input:focus{border-color:var(--b)}
+button{background:linear-gradient(90deg,var(--b),var(--a));color:#06110b;border:0;padding:13px 22px;border-radius:12px;font-weight:700;cursor:pointer;font-size:.95rem}
+button:disabled{opacity:.6}
+.muted{color:var(--muted);font-size:.88rem}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:600;margin:3px 4px 3px 0}
+.badge.green{background:rgba(20,241,149,.15);color:var(--a)}
+.badge.purple{background:rgba(153,69,255,.2);color:#c084fc}
+.badge.red{background:rgba(255,77,109,.15);color:var(--danger)}
+.badge.yellow{background:rgba(255,176,32,.15);color:var(--warn)}
+.result-box{display:none;margin-top:18px}
+.result-box.show{display:block}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.stat{background:rgba(13,17,23,.7);border-radius:12px;padding:12px;border:1px solid var(--line)}
+.stat .label{font-size:.75rem;color:var(--muted)}
+.stat .value{font-size:1.1rem;font-weight:700;margin-top:2px}
+.loading{display:none;text-align:center;padding:20px;color:var(--muted)}
+.loading.show{display:block}
+.spinner{width:28px;height:28px;border:3px solid var(--line);border-top-color:var(--a);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+a{color:var(--a);text-decoration:none}
+footer{margin-top:40px;text-align:center;color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1 class="brand">TVibex402</h1>
+<p class="tag">Free Solana token data API for AI agents & bots</p>
+<div class="card">
+<p style="font-weight:600;margin-bottom:12px">Try it live</p>
+<input type="text" id="mint" placeholder="Paste Solana token mint address" autocomplete="off" spellcheck="false">
+<div style="margin-top:12px"><button id="btn" onclick="getSignal()">Get Signal</button></div>
+<p class="muted" style="margin-top:12px">No API key • No signup • Instant JSON</p>
+<div class="loading" id="loading"><div class="spinner"></div>Fetching live data...</div>
+<div class="result-box" id="result"></div>
+</div>
+<h2>What you get</h2>
+<div class="grid">
+<div class="item">Price, FDV, Market Cap</div>
+<div class="item">Price change 5m / 1h / 6h / 24h</div>
+<div class="item">Liquidity + Pair age</div>
+<div class="item">Volume 5m / 1h / 6h</div>
+<div class="item">Buy / Sell + Buy pressure</div>
+<div class="item">Volume spike + Flags</div>
+</div>
+<h2>Endpoint for Agents</h2>
+<div class="card" style="padding:16px">
+<pre style="margin:0;background:#0d1117;padding:14px;border-radius:12px;overflow:auto;font-size:.82rem">GET /signal?mint=TOKEN_MINT_ADDRESS</pre>
+<p class="muted" style="margin-top:10px">Example: <a href="/signal?mint=So11111111111111111111111111111111111111112">/signal?mint=So111...112</a></p>
+</div>
+<footer>TVibex402 • Built for AI Agents</footer>
+</div>
+<script>
+async function getSignal(){
+const mint=document.getElementById('mint').value.trim();
+if(!mint||mint.length<32){alert('Please paste a valid Solana mint address');return}
+const btn=document.getElementById('btn'),loading=document.getElementById('loading'),result=document.getElementById('result');
+btn.disabled=true;loading.classList.add('show');result.classList.remove('show');result.innerHTML='';
+try{
+const res=await fetch('/signal?mint='+encodeURIComponent(mint));
+const data=await res.json();
+if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+(data.detail||'Failed')+'</div>'}
+else{
+const flags=(data.flags||[]).map(f=>{
+let cls='purple';
+if(f.includes('buying')||f.includes('momentum'))cls='green';
+if(f.includes('selling')||f.includes('dump')||f.includes('low'))cls='red';
+if(f.includes('new')||f.includes('spike'))cls='yellow';
+return '<span class="badge '+cls+'">'+f+'</span>';
+}).join('');
+result.innerHTML=`<div style="margin-top:8px">
+<div style="display:flex;justify-content:space-between;align-items:center">
+<div><div style="font-size:1.4rem;font-weight:700">${data.token||'—'}</div>
+<div class="muted" style="font-size:.85rem">${data.name||''}</div></div>
+<div style="text-align:right"><div style="font-size:1.3rem;font-weight:700">\[ {data.price_usd||'—'}</div>
+<div class="muted" style="font-size:.8rem">${data.dex||''}</div></div></div>
+<div class="stat-grid">
+<div class="stat"><div class="label">Liquidity</div><div class="value"> \]{(data.liquidity_usd||0).toLocaleString()}</div></div>
+<div class="stat"><div class="label">Buy Pressure 5m</div><div class="value">${data.buy_pressure_5m!=null?(data.buy_pressure_5m*100).toFixed(1)+'%':'—'}</div></div>
+<div class="stat"><div class="label">Volume 5m</div><div class="value">$${(data.volume_5m||0).toLocaleString()}</div></div>
+<div class="stat"><div class="label">Volume Spike</div><div class="value">${data.volume_spike_ratio_5m!=null?data.volume_spike_ratio_5m+'x':'—'}</div></div>
+</div>
+<div style="margin:12px 0 6px;font-size:.85rem;color:var(--muted)">Flags</div>
+<div>${flags||'<span class="muted">None</span>'}</div></div>`;
+}
+result.classList.add('show');
+}catch(e){result.innerHTML='<p style="color:#ff4d6d">Network error</p>';result.classList.add('show')}
+loading.classList.remove('show');btn.disabled=false;
+}
+document.getElementById('mint').addEventListener('keypress',e=>{if(e.key==='Enter')getSignal()});
+</script>
+</body>
+</html>"""
+
+@app.get("/demo")
+async def demo():
+    return {"token":"SOL","price_usd":"119.54","sample":True,"note":"Static sample"}
+
+@app.get("/signal")
+async def signal(mint: str = Query(..., min_length=32, max_length=48)):
+    mint = mint.strip()
+    if not (32 <= len(mint) <= 44) or not all(c.isalnum() for c in mint):
+        raise HTTPException(status_code=400, detail="Invalid token address")
+    cached = cache_get(mint)
+    if cached:
+        return JSONResponse(content=cached, headers={"X-Cache":"HIT"})
+    url = DEX_URL.format(mint=mint)
+    try:
+        async with httpx.AsyncClient(timeout=18.0) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Could not fetch data")
+            data = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not fetch data")
+    pairs = data.get("pairs") or []
+    pair = pick_best_pair(pairs)
+    if not pair:
+        raise HTTPException(status_code=404, detail="No Solana pair found")
+    result = compute_signals(pair)
+    cache_set(mint, result)
+    return JSONResponse(content=result, headers={"X-Cache":"MISS"})
+
+@app.get("/health")
+async def health():
+    return {"status":"ok","cache_size":len(_cache)}

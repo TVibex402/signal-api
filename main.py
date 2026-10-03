@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58
 
@@ -519,4 +519,4 @@ async def soft(coro, timeout: float):
     in the background so it lands in the cache for the next request."""
     task = asyncio.ensure_future(coro)
     _bg.add(task)
-    task.add_done_callb
+    task.add_done_call

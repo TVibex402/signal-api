@@ -1,4 +1,6 @@
 import asyncio
+import json
+import math
 import os
 import re
 import time
@@ -12,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58
 
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(6.0, connect=3.0),
         headers={"User-Agent": f"TVibex402/{VERSION}"},
     )
+    resolver = asyncio.create_task(resolver_loop(app)) if PRED_ENABLED else None
     try:
         if mcp_server is not None:
             # the MCP Streamable HTTP session manager must run for the app's whole lifetime
@@ -62,6 +65,8 @@ async def lifespan(app: FastAPI):
         else:
             yield
     finally:
+        if resolver:
+            resolver.cancel()
         await app.state.client.aclose()
 
 
@@ -280,11 +285,13 @@ async def rpc(client: httpx.AsyncClient, method: str, params: list):
 
 async def fetch_security(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
     """Raw on-chain data. Never raises; returns None if nothing could be read."""
+    t_rpc = time.time()
     info_r, big_r = await asyncio.gather(
         rpc(client, "getAccountInfo", [mint, {"encoding": "jsonParsed"}]),
         rpc(client, "getTokenLargestAccounts", [mint, {"commitment": "confirmed"}]),
         return_exceptions=True,
     )
+    src_log("solana_rpc", not isinstance(info_r, Exception) and not isinstance(big_r, Exception), t_rpc)
     raw: Dict[str, Any] = {"info_ok": False, "holders": None, "supply": None}
 
     try:
@@ -404,7 +411,8 @@ def build_security(raw: Optional[dict], pool_ids: set):
 def finalize_risk(result: dict, onchain: bool):
     """Heuristic 0-100 score from market flags (+ on-chain flags when available).
     It is a quick filter, NOT a guarantee."""
-    score = min(100, sum(RISK_WEIGHTS.get(f, 0) for f in result["flags"]))
+    score = min(100, sum(ACTIVE_WEIGHTS.get(f, 0) for f in result["flags"]))
+    result["scoring"] = "tuned" if _tune["on"] else "static"
     result["risk_score"] = score
     result["risk_level"] = "low" if score < 25 else "medium" if score < 50 else "high"
     result["risk_basis"] = "market+onchain" if onchain else "market"
@@ -416,6 +424,7 @@ async def get_lp_lock(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
     cached = cache_get(key, SEC_CACHE_TTL)
     if cached:
         return cached
+    t0 = time.time()
     try:
         resp = await client.get(RUGCHECK_URL.format(mint=mint))
         resp.raise_for_status()
@@ -430,18 +439,24 @@ async def get_lp_lock(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
                 if isinstance(r, dict)
             ],
         }
+        src_log("rugcheck", True, t0)
     except Exception:
+        src_log("rugcheck", False, t0)
         return None
     cache_set(key, out)
     return out
 
 
 async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
+    t0 = time.time()
     try:
         resp = await client.get(DEX_URL.format(mint=mint))
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        src_log("dexscreener", True, t0)
+        return data
     except (httpx.HTTPError, ValueError):
+        src_log("dexscreener", False, t0)
         raise HTTPException(status_code=502, detail="Upstream data source unavailable, retry in a few seconds")
 
 
@@ -504,21 +519,4 @@ async def soft(coro, timeout: float):
     in the background so it lands in the cache for the next request."""
     task = asyncio.ensure_future(coro)
     _bg.add(task)
-    task.add_done_callback(_bg.discard)
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout)
-    except Exception:
-        return None
-
-
-async def build_signal(client: httpx.AsyncClient, mint: str, security: bool):
-    """Return (result, cache_status). Raises HTTPException on failure."""
-    cache_key = mint if security else mint + ":nosec"
-    hit = cache_peek(cache_key)
-    stale = None
-    if hit:
-        age, cached = hit
-        if age <= (PARTIAL_TTL if cached.get("partial") else CACHE_TTL):
-            return cached, "HIT"
-        if age <= STALE_MAX:
-   
+    task.add_done_callb

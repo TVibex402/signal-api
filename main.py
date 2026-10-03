@@ -1,13 +1,42 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-import httpx
-from typing import Optional, Dict, Any
+import re
 import time
-from collections import OrderedDict
 import threading
+from collections import OrderedDict, deque
+from contextlib import asynccontextmanager
+from typing import Any, Dict, Optional
 
-app = FastAPI(title="TVibex402", version="1.2.0")
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+
+VERSION = "1.3.0"
+DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
+MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58
+
+CACHE_TTL = 30
+CACHE_MAX = 500
+RATE_LIMIT = 30      # requests
+RATE_WINDOW = 60     # seconds, per IP
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # One shared client = connection reuse, much faster than a new client per request
+    app.state.client = httpx.AsyncClient(
+        timeout=httpx.Timeout(6.0, connect=3.0),
+        headers={"User-Agent": f"TVibex402/{VERSION}"},
+    )
+    yield
+    await app.state.client.aclose()
+
+
+app = FastAPI(
+    title="TVibex402",
+    version=VERSION,
+    description="Free Solana token data API for AI agents & bots. Not financial advice.",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,13 +45,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CACHE_TTL = 30
-CACHE_MAX = 200
-_cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
-_lock = threading.Lock()
+# ---------- cache ----------
+_cache: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
+_cache_lock = threading.Lock()
+
 
 def cache_get(key: str) -> Optional[dict]:
-    with _lock:
+    with _cache_lock:
         item = _cache.get(key)
         if not item:
             return None
@@ -33,21 +62,67 @@ def cache_get(key: str) -> Optional[dict]:
         _cache.move_to_end(key)
         return data
 
+
 def cache_set(key: str, data: dict):
-    with _lock:
-        if key in _cache:
-            _cache.move_to_end(key)
+    with _cache_lock:
         _cache[key] = (time.time(), data)
+        _cache.move_to_end(key)
         while len(_cache) > CACHE_MAX:
             _cache.popitem(last=False)
 
-DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 
-def pick_best_pair(pairs: list) -> Optional[dict]:
+# ---------- rate limit (per IP, in-memory sliding window) ----------
+_hits: Dict[str, deque] = {}
+_rl_lock = threading.Lock()
+
+
+def client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limited(ip: str) -> int:
+    """Return 0 if allowed, else seconds to wait."""
+    now = time.time()
+    with _rl_lock:
+        dq = _hits.setdefault(ip, deque())
+        while dq and now - dq[0] > RATE_WINDOW:
+            dq.popleft()
+        if len(dq) >= RATE_LIMIT:
+            return int(RATE_WINDOW - (now - dq[0])) + 1
+        dq.append(now)
+        if len(_hits) > 5000:  # cleanup stale IPs
+            for k in [k for k, v in _hits.items() if not v or now - v[-1] > RATE_WINDOW]:
+                _hits.pop(k, None)
+    return 0
+
+
+# ---------- signal logic ----------
+def pick_best_pair(pairs: list, mint: str) -> Optional[dict]:
     sol = [p for p in pairs if p.get("chainId") == "solana"]
     if not sol:
         return None
-    return max(sol, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+    # Prefer pairs where the requested mint is the BASE token (otherwise data is for the other token)
+    base_match = [p for p in sol if (p.get("baseToken") or {}).get("address") == mint]
+    pool = base_match or sol
+    return max(pool, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+
+
+RISK_WEIGHTS = {
+    "very_low_liquidity": 30,
+    "low_liquidity": 15,
+    "brand_new_pair": 20,
+    "very_new_pair": 10,
+    "new_pair": 5,
+    "extreme_turnover": 15,
+    "high_turnover": 5,
+    "dump_risk": 25,
+    "heavy_selling": 10,
+    "extreme_volume_spike": 10,
+}
+
 
 def compute_signals(pair: dict) -> Dict[str, Any]:
     base = pair.get("baseToken") or {}
@@ -93,7 +168,7 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
     created = pair.get("pairCreatedAt")
     age_minutes = None
     if created:
-        age_minutes = int((time.time() * 1000 - created) / 60000)
+        age_minutes = max(0, int((time.time() * 1000 - created) / 60000))
         if age_minutes < 60:
             flags.append("brand_new_pair")
         elif age_minutes < 360:
@@ -108,6 +183,11 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
         flags.append("dump_risk")
     if total_5m >= 300:
         flags.append("high_activity")
+
+    # Heuristic market-based risk score (0-100). NOT a rug-check: it does not
+    # look at mint authority, holders or LP lock.
+    risk_score = min(100, sum(RISK_WEIGHTS.get(f, 0) for f in flags))
+    risk_level = "low" if risk_score < 25 else "medium" if risk_score < 50 else "high"
 
     return {
         "token": base.get("symbol") or "UNKNOWN",
@@ -135,16 +215,22 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
         "dex": pair.get("dexId"),
         "pair_address": pair.get("pairAddress"),
         "flags": flags,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "timestamp": int(time.time()),
+        "source": "dexscreener",
+        "version": VERSION,
     }
 
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    return """<!DOCTYPE html>
+
+# ---------- pages ----------
+HOME_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TVibex402</title>
+<title>TVibex402 - Solana token data API for AI agents</title>
+<meta name="description" content="Free Solana token data API for AI agents and bots. No API key, instant JSON.">
 <style>
 :root{--bg:#070b12;--card:rgba(18,25,35,.8);--line:rgba(34,48,66,.8);--text:#e8eef6;--muted:#8b9bb4;--a:#14f195;--b:#9945ff;--danger:#ff4d6d;--warn:#ffb020}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -177,18 +263,19 @@ button:disabled{opacity:.6}
 .spinner{width:28px;height:28px;border:3px solid var(--line);border-top-color:var(--a);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 10px}
 @keyframes spin{to{transform:rotate(360deg)}}
 a{color:var(--a);text-decoration:none}
+pre{margin:0;background:#0d1117;padding:14px;border-radius:12px;overflow:auto;font-size:.82rem}
 footer{margin-top:40px;text-align:center;color:var(--muted);font-size:.85rem}
 </style>
 </head>
 <body>
 <div class="wrap">
 <h1 class="brand">TVibex402</h1>
-<p class="tag">Free Solana token data API for AI agents & bots</p>
+<p class="tag">Free Solana token data API for AI agents &amp; bots</p>
 <div class="card">
 <p style="font-weight:600;margin-bottom:12px">Try it live</p>
 <input type="text" id="mint" placeholder="Paste Solana token mint address" autocomplete="off" spellcheck="false">
 <div style="margin-top:12px"><button id="btn" onclick="getSignal()">Get Signal</button></div>
-<p class="muted" style="margin-top:12px">No API key • No signup • Instant JSON</p>
+<p class="muted" style="margin-top:12px">No API key &bull; No signup &bull; Instant JSON</p>
 <div class="loading" id="loading"><div class="spinner"></div>Fetching live data...</div>
 <div class="result-box" id="result"></div>
 </div>
@@ -199,44 +286,48 @@ footer{margin-top:40px;text-align:center;color:var(--muted);font-size:.85rem}
 <div class="item">Liquidity + Pair age</div>
 <div class="item">Volume 5m / 1h / 6h</div>
 <div class="item">Buy / Sell + Buy pressure</div>
-<div class="item">Volume spike + Flags</div>
+<div class="item">Volume spike + Flags + Risk score</div>
 </div>
 <h2>Endpoint for Agents</h2>
 <div class="card" style="padding:16px">
-<pre style="margin:0;background:#0d1117;padding:14px;border-radius:12px;overflow:auto;font-size:.82rem">GET /signal?mint=TOKEN_MINT_ADDRESS</pre>
+<pre>GET /signal?mint=TOKEN_MINT_ADDRESS</pre>
 <p class="muted" style="margin-top:10px">Example: <a href="/signal?mint=So11111111111111111111111111111111111111112">/signal?mint=So111...112</a></p>
+<p class="muted" style="margin-top:6px">Docs: <a href="/docs">/docs</a> &bull; <a href="/llms.txt">/llms.txt</a> &bull; Limit: 30 req/min per IP</p>
 </div>
-<footer>TVibex402 • Built for AI Agents</footer>
+<footer>TVibex402 &bull; Built for AI Agents<br>Data from DexScreener. Not financial advice. Risk score is a market heuristic, not a security audit.</footer>
 </div>
 <script>
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function getSignal(){
 const mint=document.getElementById('mint').value.trim();
-if(!mint||mint.length<32){alert('Please paste a valid Solana mint address');return}
+if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)){alert('Please paste a valid Solana mint address');return}
 const btn=document.getElementById('btn'),loading=document.getElementById('loading'),result=document.getElementById('result');
 btn.disabled=true;loading.classList.add('show');result.classList.remove('show');result.innerHTML='';
 try{
 const res=await fetch('/signal?mint='+encodeURIComponent(mint));
 const data=await res.json();
-if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+(data.detail||'Failed')+'</div>'}
+if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+esc(data.detail||'Failed')+'</div>'}
 else{
 const flags=(data.flags||[]).map(f=>{
 let cls='purple';
 if(f.includes('buying')||f.includes('momentum'))cls='green';
 if(f.includes('selling')||f.includes('dump')||f.includes('low'))cls='red';
 if(f.includes('new')||f.includes('spike'))cls='yellow';
-return '<span class="badge '+cls+'">'+f+'</span>';
+return '<span class="badge '+cls+'">'+esc(f)+'</span>';
 }).join('');
+const riskColor=data.risk_level==='high'?'var(--danger)':data.risk_level==='medium'?'var(--warn)':'var(--a)';
 result.innerHTML=`<div style="margin-top:8px">
 <div style="display:flex;justify-content:space-between;align-items:center">
-<div><div style="font-size:1.4rem;font-weight:700">${data.token||'—'}</div>
-<div class="muted" style="font-size:.85rem">${data.name||''}</div></div>
-<div style="text-align:right"><div style="font-size:1.3rem;font-weight:700">\[ {data.price_usd||'—'}</div>
-<div class="muted" style="font-size:.8rem">${data.dex||''}</div></div></div>
+<div><div style="font-size:1.4rem;font-weight:700">${esc(data.token)}</div>
+<div class="muted" style="font-size:.85rem">${esc(data.name)}</div></div>
+<div style="text-align:right"><div style="font-size:1.3rem;font-weight:700">$${esc(data.price_usd||'-')}</div>
+<div class="muted" style="font-size:.8rem">${esc(data.dex)}</div></div></div>
 <div class="stat-grid">
-<div class="stat"><div class="label">Liquidity</div><div class="value"> \]{(data.liquidity_usd||0).toLocaleString()}</div></div>
-<div class="stat"><div class="label">Buy Pressure 5m</div><div class="value">${data.buy_pressure_5m!=null?(data.buy_pressure_5m*100).toFixed(1)+'%':'—'}</div></div>
-<div class="stat"><div class="label">Volume 5m</div><div class="value">$${(data.volume_5m||0).toLocaleString()}</div></div>
-<div class="stat"><div class="label">Volume Spike</div><div class="value">${data.volume_spike_ratio_5m!=null?data.volume_spike_ratio_5m+'x':'—'}</div></div>
+<div class="stat"><div class="label">Liquidity</div><div class="value">$${esc((data.liquidity_usd||0).toLocaleString())}</div></div>
+<div class="stat"><div class="label">Buy Pressure 5m</div><div class="value">${data.buy_pressure_5m!=null?(data.buy_pressure_5m*100).toFixed(1)+'%':'-'}</div></div>
+<div class="stat"><div class="label">Volume 5m</div><div class="value">$${esc((data.volume_5m||0).toLocaleString())}</div></div>
+<div class="stat"><div class="label">Volume Spike</div><div class="value">${data.volume_spike_ratio_5m!=null?esc(data.volume_spike_ratio_5m)+'x':'-'}</div></div>
+<div class="stat"><div class="label">Risk Score</div><div class="value" style="color:${riskColor}">${esc(data.risk_score)} (${esc(data.risk_level)})</div></div>
 </div>
 <div style="margin:12px 0 6px;font-size:.85rem;color:var(--muted)">Flags</div>
 <div>${flags||'<span class="muted">None</span>'}</div></div>`;
@@ -250,35 +341,71 @@ document.getElementById('mint').addEventListener('keypress',e=>{if(e.key==='Ente
 </body>
 </html>"""
 
+LLMS_TXT = """# TVibex402
+> Free Solana token data API for AI agents and bots. No API key. Data from DexScreener. Not financial advice.
+
+## Endpoint
+GET /signal?mint=<SOLANA_TOKEN_MINT>
+Returns JSON: price, FDV, market cap, price change (5m/1h/6h/24h), liquidity, volume, buy/sell counts,
+buy pressure, volume spike ratio, pair age, flags, risk_score (0-100 heuristic), risk_level.
+
+## Other
+GET /health  - service status
+GET /docs    - OpenAPI docs
+Rate limit: 30 requests/minute per IP (HTTP 429 with Retry-After).
+Cache: results cached up to 30 seconds (X-Cache: HIT/MISS).
+"""
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def home():
+    return HOME_HTML
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse, include_in_schema=False)
+async def llms():
+    return LLMS_TXT
+
+
 @app.get("/demo")
 async def demo():
-    return {"token":"SOL","price_usd":"119.54","sample":True,"note":"Static sample"}
+    return {"token": "SOL", "price_usd": "119.54", "sample": True, "note": "Static sample"}
+
 
 @app.get("/signal")
-async def signal(mint: str = Query(..., min_length=32, max_length=48)):
+async def signal(request: Request, mint: str = Query(..., min_length=1, max_length=64)):
     mint = mint.strip()
-    if not (32 <= len(mint) <= 44) or not all(c.isalnum() for c in mint):
-        raise HTTPException(status_code=400, detail="Invalid token address")
+    if not MINT_RE.match(mint):
+        raise HTTPException(status_code=400, detail="Invalid Solana token address")
+
+    wait = rate_limited(client_ip(request))
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Retry in {wait}s",
+            headers={"Retry-After": str(wait)},
+        )
+
     cached = cache_get(mint)
     if cached:
-        return JSONResponse(content=cached, headers={"X-Cache":"HIT"})
-    url = DEX_URL.format(mint=mint)
+        return JSONResponse(content=cached, headers={"X-Cache": "HIT", "Cache-Control": "public, max-age=10"})
+
     try:
-        async with httpx.AsyncClient(timeout=18.0) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail="Could not fetch data")
-            data = resp.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Could not fetch data")
-    pairs = data.get("pairs") or []
-    pair = pick_best_pair(pairs)
+        resp = await request.app.state.client.get(DEX_URL.format(mint=mint))
+        resp.raise_for_status()
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail="Upstream data source unavailable, try again shortly")
+
+    pair = pick_best_pair(data.get("pairs") or [], mint)
     if not pair:
-        raise HTTPException(status_code=404, detail="No Solana pair found")
+        raise HTTPException(status_code=404, detail="No Solana pair found for this token")
+
     result = compute_signals(pair)
     cache_set(mint, result)
-    return JSONResponse(content=result, headers={"X-Cache":"MISS"})
+    return JSONResponse(content=result, headers={"X-Cache": "MISS", "Cache-Control": "public, max-age=10"})
+
 
 @app.get("/health")
 async def health():
-    return {"status":"ok","cache_size":len(_cache)}
+    return {"status": "ok", "version": VERSION, "cache_size": len(_cache)}

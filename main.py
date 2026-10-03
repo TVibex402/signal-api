@@ -1,3 +1,5 @@
+import asyncio
+import os
 import re
 import time
 import threading
@@ -10,12 +12,26 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")  # base58
 
 CACHE_TTL = 30
 CACHE_MAX = 500
+SEC_CACHE_TTL = 120  # authorities/holders change slowly
+
+# Solana RPC. The public endpoint is heavily rate-limited: set SOLANA_RPC_URL
+# (e.g. a free Helius URL) in Render > Environment for reliable results.
+RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+RUGCHECK_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"  # public, no key
+TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+RISKY_EXTENSIONS = {"permanentDelegate", "transferHook", "transferFeeConfig", "defaultAccountState"}
+# Holders that are not "real" holders: burn address + common AMM pool authorities (best effort)
+KNOWN_NON_HOLDERS = {
+    "1nc1nerator11111111111111111111111111111111",  # burn
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium AMM v4 authority
+    "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",  # Raydium CPMM authority
+}
 RATE_LIMIT = 30      # requests
 RATE_WINDOW = 60     # seconds, per IP
 
@@ -50,13 +66,13 @@ _cache: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def cache_get(key: str) -> Optional[dict]:
+def cache_get(key: str, ttl: int = CACHE_TTL) -> Optional[dict]:
     with _cache_lock:
         item = _cache.get(key)
         if not item:
             return None
         ts, data = item
-        if time.time() - ts > CACHE_TTL:
+        if time.time() - ts > ttl:
             _cache.pop(key, None)
             return None
         _cache.move_to_end(key)
@@ -121,6 +137,14 @@ RISK_WEIGHTS = {
     "dump_risk": 25,
     "heavy_selling": 10,
     "extreme_volume_spike": 10,
+    "mint_authority_active": 25,
+    "freeze_authority_active": 20,
+    "risky_token_extension": 20,
+    "extreme_holder_concentration": 30,
+    "high_holder_concentration": 15,
+    "dominant_holder": 10,
+    "lp_not_locked": 25,
+    "lp_partially_locked": 10,
 }
 
 
@@ -184,11 +208,6 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
     if total_5m >= 300:
         flags.append("high_activity")
 
-    # Heuristic market-based risk score (0-100). NOT a rug-check: it does not
-    # look at mint authority, holders or LP lock.
-    risk_score = min(100, sum(RISK_WEIGHTS.get(f, 0) for f in flags))
-    risk_level = "low" if risk_score < 25 else "medium" if risk_score < 50 else "high"
-
     return {
         "token": base.get("symbol") or "UNKNOWN",
         "name": base.get("name"),
@@ -215,12 +234,189 @@ def compute_signals(pair: dict) -> Dict[str, Any]:
         "dex": pair.get("dexId"),
         "pair_address": pair.get("pairAddress"),
         "flags": flags,
-        "risk_score": risk_score,
-        "risk_level": risk_level,
         "timestamp": int(time.time()),
         "source": "dexscreener",
         "version": VERSION,
     }
+
+
+# ---------- on-chain security (Solana RPC) ----------
+async def rpc(client: httpx.AsyncClient, method: str, params: list):
+    resp = await client.post(
+        RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get("error"):
+        raise RuntimeError(str(body["error"])[:200])
+    return body.get("result")
+
+
+async def fetch_security(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
+    """Raw on-chain data. Never raises; returns None if nothing could be read."""
+    info_r, big_r = await asyncio.gather(
+        rpc(client, "getAccountInfo", [mint, {"encoding": "jsonParsed"}]),
+        rpc(client, "getTokenLargestAccounts", [mint, {"commitment": "confirmed"}]),
+        return_exceptions=True,
+    )
+    raw: Dict[str, Any] = {"info_ok": False, "holders": None, "supply": None}
+
+    try:
+        val = (info_r or {}).get("value") if not isinstance(info_r, Exception) else None
+        data = (val or {}).get("data")
+        parsed = data.get("parsed") if isinstance(data, dict) else None
+        if parsed and parsed.get("type") == "mint":
+            info = parsed.get("info") or {}
+            raw.update(
+                info_ok=True,
+                mint_authority=info.get("mintAuthority"),
+                freeze_authority=info.get("freezeAuthority"),
+                decimals=info.get("decimals"),
+                supply=int(info.get("supply") or 0) or None,
+                program="token-2022" if val.get("owner") == TOKEN_2022 else "spl-token",
+                extensions=[e.get("extension") for e in (info.get("extensions") or []) if isinstance(e, dict)],
+            )
+    except Exception:
+        pass
+
+    try:
+        if not isinstance(big_r, Exception) and big_r:
+            accts = big_r.get("value") or []
+            addrs = [a["address"] for a in accts]
+            owners: Dict[str, str] = {}
+            if addrs:
+                try:
+                    multi = await rpc(client, "getMultipleAccounts", [addrs, {"encoding": "jsonParsed"}])
+                    for addr, acc in zip(addrs, (multi or {}).get("value") or []):
+                        try:
+                            owners[addr] = acc["data"]["parsed"]["info"]["owner"]
+                        except (TypeError, KeyError):
+                            pass
+                except Exception:
+                    pass
+            raw["holders"] = [
+                {"account": a["address"], "owner": owners.get(a["address"]), "amount": int(a.get("amount") or 0)}
+                for a in accts
+            ]
+    except Exception:
+        pass
+
+    if not raw["info_ok"] and raw["holders"] is None:
+        return None
+    return raw
+
+
+async def get_security(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
+    key = "sec:" + mint
+    cached = cache_get(key, SEC_CACHE_TTL)
+    if cached:
+        return cached
+    try:
+        raw = await fetch_security(client, mint)
+    except Exception:
+        return None
+    if raw:
+        cache_set(key, raw)
+    return raw
+
+
+def build_security(raw: Optional[dict], pool_ids: set):
+    """Turn raw on-chain data into a public `security` block + extra flags."""
+    if not raw:
+        return {"available": False}, []
+    flags = []
+    out: Dict[str, Any] = {"available": True, "partial": False}
+
+    if raw.get("info_ok"):
+        ma, fa = raw.get("mint_authority"), raw.get("freeze_authority")
+        out.update(
+            mint_authority_revoked=ma is None,
+            freeze_authority_revoked=fa is None,
+            token_program=raw.get("program"),
+            decimals=raw.get("decimals"),
+        )
+        risky = sorted(set(raw.get("extensions") or []) & RISKY_EXTENSIONS)
+        out["risky_extensions"] = risky
+        if ma is not None:
+            flags.append("mint_authority_active")
+        if fa is not None:
+            flags.append("freeze_authority_active")
+        if risky:
+            flags.append("risky_token_extension")
+    else:
+        out["partial"] = True
+
+    holders, supply = raw.get("holders"), raw.get("supply")
+    if holders and supply:
+        excluded_ids = pool_ids | KNOWN_NON_HOLDERS
+        real, pool_pct = [], 0.0
+        for h in holders:
+            pct = h["amount"] / supply * 100
+            if h["owner"] in excluded_ids or h["account"] in excluded_ids:
+                pool_pct += pct
+            else:
+                real.append({"owner": h["owner"] or h["account"], "pct": round(pct, 2)})
+        top1 = real[0]["pct"] if real else 0.0
+        top10 = round(sum(h["pct"] for h in real[:10]), 2)
+        out.update(
+            top1_holder_pct=top1,
+            top10_holders_pct=top10,
+            liquidity_pool_pct=round(pool_pct, 2),
+            top_holders=real[:5],
+        )
+        if top10 >= 80:
+            flags.append("extreme_holder_concentration")
+        elif top10 >= 50:
+            flags.append("high_holder_concentration")
+        if top1 >= 20:
+            flags.append("dominant_holder")
+    else:
+        out["partial"] = True
+    return out, flags
+
+
+def finalize_risk(result: dict, onchain: bool):
+    """Heuristic 0-100 score from market flags (+ on-chain flags when available).
+    It is a quick filter, NOT a guarantee."""
+    score = min(100, sum(RISK_WEIGHTS.get(f, 0) for f in result["flags"]))
+    result["risk_score"] = score
+    result["risk_level"] = "low" if score < 25 else "medium" if score < 50 else "high"
+    result["risk_basis"] = "market+onchain" if onchain else "market"
+
+
+async def get_lp_lock(client: httpx.AsyncClient, mint: str) -> Optional[dict]:
+    """LP lock/burn % + RugCheck score from RugCheck's public summary. Never raises."""
+    key = "lp:" + mint
+    cached = cache_get(key, SEC_CACHE_TTL)
+    if cached:
+        return cached
+    try:
+        resp = await client.get(RUGCHECK_URL.format(mint=mint))
+        resp.raise_for_status()
+        j = resp.json()
+        pct = j.get("lpLockedPct")
+        out = {
+            "lp_locked_pct": round(float(pct), 2) if pct is not None else None,
+            "rugcheck_score": j.get("score_normalised"),  # 0-100, higher = riskier
+            "rugcheck_risks": [
+                {"name": r.get("name"), "level": r.get("level")}
+                for r in (j.get("risks") or [])[:6]
+                if isinstance(r, dict)
+            ],
+        }
+    except Exception:
+        return None
+    cache_set(key, out)
+    return out
+
+
+async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
+    try:
+        resp = await client.get(DEX_URL.format(mint=mint))
+        resp.raise_for_status()
+        return resp.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail="Upstream data source unavailable, try again shortly")
 
 
 # ---------- pages ----------
@@ -287,6 +483,8 @@ footer{margin-top:40px;text-align:center;color:var(--muted);font-size:.85rem}
 <div class="item">Volume 5m / 1h / 6h</div>
 <div class="item">Buy / Sell + Buy pressure</div>
 <div class="item">Volume spike + Flags + Risk score</div>
+<div class="item">Mint/Freeze authority + Holder concentration</div>
+<div class="item">LP locked/burned % (via RugCheck)</div>
 </div>
 <h2>Endpoint for Agents</h2>
 <div class="card" style="padding:16px">
@@ -294,118 +492,10 @@ footer{margin-top:40px;text-align:center;color:var(--muted);font-size:.85rem}
 <p class="muted" style="margin-top:10px">Example: <a href="/signal?mint=So11111111111111111111111111111111111111112">/signal?mint=So111...112</a></p>
 <p class="muted" style="margin-top:6px">Docs: <a href="/docs">/docs</a> &bull; <a href="/llms.txt">/llms.txt</a> &bull; Limit: 30 req/min per IP</p>
 </div>
-<footer>TVibex402 &bull; Built for AI Agents<br>Data from DexScreener. Not financial advice. Risk score is a market heuristic, not a security audit.</footer>
+<footer>TVibex402 &bull; Built for AI Agents<br>Data from DexScreener. Not financial advice. Risk score is a heuristic (market + on-chain), not a security audit. LP lock % is sourced from RugCheck.</footer>
 </div>
 <script>
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function getSignal(){
 const mint=document.getElementById('mint').value.trim();
-if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)){alert('Please paste a valid Solana mint address');return}
-const btn=document.getElementById('btn'),loading=document.getElementById('loading'),result=document.getElementById('result');
-btn.disabled=true;loading.classList.add('show');result.classList.remove('show');result.innerHTML='';
-try{
-const res=await fetch('/signal?mint='+encodeURIComponent(mint));
-const data=await res.json();
-if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+esc(data.detail||'Failed')+'</div>'}
-else{
-const flags=(data.flags||[]).map(f=>{
-let cls='purple';
-if(f.includes('buying')||f.includes('momentum'))cls='green';
-if(f.includes('selling')||f.includes('dump')||f.includes('low'))cls='red';
-if(f.includes('new')||f.includes('spike'))cls='yellow';
-return '<span class="badge '+cls+'">'+esc(f)+'</span>';
-}).join('');
-const riskColor=data.risk_level==='high'?'var(--danger)':data.risk_level==='medium'?'var(--warn)':'var(--a)';
-result.innerHTML=`<div style="margin-top:8px">
-<div style="display:flex;justify-content:space-between;align-items:center">
-<div><div style="font-size:1.4rem;font-weight:700">${esc(data.token)}</div>
-<div class="muted" style="font-size:.85rem">${esc(data.name)}</div></div>
-<div style="text-align:right"><div style="font-size:1.3rem;font-weight:700">$${esc(data.price_usd||'-')}</div>
-<div class="muted" style="font-size:.8rem">${esc(data.dex)}</div></div></div>
-<div class="stat-grid">
-<div class="stat"><div class="label">Liquidity</div><div class="value">$${esc((data.liquidity_usd||0).toLocaleString())}</div></div>
-<div class="stat"><div class="label">Buy Pressure 5m</div><div class="value">${data.buy_pressure_5m!=null?(data.buy_pressure_5m*100).toFixed(1)+'%':'-'}</div></div>
-<div class="stat"><div class="label">Volume 5m</div><div class="value">$${esc((data.volume_5m||0).toLocaleString())}</div></div>
-<div class="stat"><div class="label">Volume Spike</div><div class="value">${data.volume_spike_ratio_5m!=null?esc(data.volume_spike_ratio_5m)+'x':'-'}</div></div>
-<div class="stat"><div class="label">Risk Score</div><div class="value" style="color:${riskColor}">${esc(data.risk_score)} (${esc(data.risk_level)})</div></div>
-</div>
-<div style="margin:12px 0 6px;font-size:.85rem;color:var(--muted)">Flags</div>
-<div>${flags||'<span class="muted">None</span>'}</div></div>`;
-}
-result.classList.add('show');
-}catch(e){result.innerHTML='<p style="color:#ff4d6d">Network error</p>';result.classList.add('show')}
-loading.classList.remove('show');btn.disabled=false;
-}
-document.getElementById('mint').addEventListener('keypress',e=>{if(e.key==='Enter')getSignal()});
-</script>
-</body>
-</html>"""
-
-LLMS_TXT = """# TVibex402
-> Free Solana token data API for AI agents and bots. No API key. Data from DexScreener. Not financial advice.
-
-## Endpoint
-GET /signal?mint=<SOLANA_TOKEN_MINT>
-Returns JSON: price, FDV, market cap, price change (5m/1h/6h/24h), liquidity, volume, buy/sell counts,
-buy pressure, volume spike ratio, pair age, flags, risk_score (0-100 heuristic), risk_level.
-
-## Other
-GET /health  - service status
-GET /docs    - OpenAPI docs
-Rate limit: 30 requests/minute per IP (HTTP 429 with Retry-After).
-Cache: results cached up to 30 seconds (X-Cache: HIT/MISS).
-"""
-
-
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def home():
-    return HOME_HTML
-
-
-@app.get("/llms.txt", response_class=PlainTextResponse, include_in_schema=False)
-async def llms():
-    return LLMS_TXT
-
-
-@app.get("/demo")
-async def demo():
-    return {"token": "SOL", "price_usd": "119.54", "sample": True, "note": "Static sample"}
-
-
-@app.get("/signal")
-async def signal(request: Request, mint: str = Query(..., min_length=1, max_length=64)):
-    mint = mint.strip()
-    if not MINT_RE.match(mint):
-        raise HTTPException(status_code=400, detail="Invalid Solana token address")
-
-    wait = rate_limited(client_ip(request))
-    if wait:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded. Retry in {wait}s",
-            headers={"Retry-After": str(wait)},
-        )
-
-    cached = cache_get(mint)
-    if cached:
-        return JSONResponse(content=cached, headers={"X-Cache": "HIT", "Cache-Control": "public, max-age=10"})
-
-    try:
-        resp = await request.app.state.client.get(DEX_URL.format(mint=mint))
-        resp.raise_for_status()
-        data = resp.json()
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(status_code=502, detail="Upstream data source unavailable, try again shortly")
-
-    pair = pick_best_pair(data.get("pairs") or [], mint)
-    if not pair:
-        raise HTTPException(status_code=404, detail="No Solana pair found for this token")
-
-    result = compute_signals(pair)
-    cache_set(mint, result)
-    return JSONResponse(content=result, headers={"X-Cache": "MISS", "Cache-Control": "public, max-age=10"})
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "version": VERSION, "cache_size": len(_cache)}
+if(!/^[

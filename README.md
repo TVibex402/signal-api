@@ -30,6 +30,7 @@ curl "http://127.0.0.1:8080/signal?mint=So11111111111111111111111111111111111111
 | GET | `/ledger` | Tamper-evident verdict ledger |
 | GET | `/metrics` | Request counts, latency, source health |
 | GET | `/health` | Health check |
+| GET | `/whoami` | The client IP the server sees (use it to check `TRUSTED_PROXY_HOPS`) |
 | GET | `/llms.txt` | Agent-friendly docs |
 | GET | `/docs` | OpenAPI |
 | POST | `/mcp` | Remote MCP server (Claude & agents) |
@@ -45,13 +46,15 @@ curl "http://127.0.0.1:8080/signal?mint=So11111111111111111111111111111111111111
 | `API_KEYS` | `secret1:label1,secret2:label2`, higher rate limit via `X-API-Key` |
 | `KEY_RATE_LIMIT` | Rate limit for keyed clients (default 300/min) |
 | `AUTO_TUNE` | `true` to auto-adjust risk weights from measured outcomes |
-| `TRUSTED_PROXY_HOPS` | Proxy hops for real client IP (Render = 1) |
+| `TRUSTED_PROXY_HOPS` | Proxy hops for real client IP (Render = 1). Check with `/whoami` |
+| `GLOBAL_KEY_RESERVE` | Upstream requests/min reserved for keyed clients (default 50) |
+| `PYTHON_VERSION` | Fully qualified Python version for Render, e.g. `3.12.7` (see below) |
 
 ## Rate limits
 
 - Anonymous: 30 requests/min per IP
 - With `X-API-Key`: higher (default 300/min)
-- A global upstream budget protects the DexScreener quota
+- A global upstream budget protects the DexScreener quota; clients with an API key have their own reserved lane in it
 
 ## How the code is organised
 
@@ -61,4 +64,6 @@ and says which file and which lines to re-check if a copy went wrong.
 
 ## Deploy notes
 
-Python 3.12 (`runtime.txt`). Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`.
+Render reads the Python version from the `PYTHON_VERSION` environment variable or from a `.python-version` file
+(it does not document `runtime.txt`). Check the build log line that says which Python was used, and set one of the two if
+you want 3.12. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`.

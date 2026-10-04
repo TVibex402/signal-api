@@ -25,7 +25,7 @@ LP_FLAGS = {"lp_not_locked", "lp_partially_locked"}
 def add_verdict(result: dict):
     """One-line decision for agents: ok | caution | avoid (heuristic, not advice)."""
     flags = set(result["flags"])
-    # Established tokens (e.g. regulated stablecoins) legitimately keep authorities
+    # Established tokens (liquidity >= $1M + pair age > 30 days) không bị avoid vì authority hoặc LP unlock
     established = result["liquidity_usd"] >= 1_000_000 and (result.get("pair_age_minutes") or 0) >= 43200
     avoid = [f for f in AVOID_FLAGS if f in flags and not (established and (f in AUTHORITY_FLAGS or f in LP_FLAGS))]
     caution = [f for f in CAUTION_FLAGS if f in flags]

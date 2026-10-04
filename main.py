@@ -26,6 +26,21 @@ _LOADER_PARTS = [
 
 
 def _load_parts():  # a function, so the loader's own variables never leak into the app's namespace
+    def checksum(block):
+        return hashlib.sha1("\n".join(text for _, text in block).encode()).hexdigest()[:6]
+
+    def first_difference(rows, sums):
+        want = sums.split()
+        for k in range(0, len(rows), 20):
+            block = rows[k:k + 20]
+            if k // 20 >= len(want):
+                return f"There is extra text after line {block[0][0]}."
+            if checksum(block) != want[k // 20]:
+                return (f"The first difference is between line {block[0][0]} and line {block[-1][0]} "
+                        f"(it starts with: {block[0][1].strip()[:50]!r}). Look for a line that was split in two, "
+                        f"repeated, or added there.")
+        return "The start matches; the end of the file is missing or has extra lines."
+
     folder = os.path.dirname(os.path.abspath(__file__))
     for name, expected, sums in _LOADER_PARTS:
         path = os.path.join(folder, name)
@@ -35,12 +50,12 @@ def _load_parts():  # a function, so the loader's own variables never leak into 
             text = fh.read()
         rows = [(i + 1, line.rstrip()) for i, line in enumerate(text.splitlines()) if line.strip()]
         if len(rows) != expected:
-            raise RuntimeError(f"{name} has {len(rows)} non-blank lines but should have {expected}: the copy was cut, "
-                               f"or a line was added or lost. Copy the whole file again")
+            raise RuntimeError(f"{name} has {len(rows)} non-blank lines but should have {expected}. "
+                               f"{first_difference(rows, sums)}")
         want = sums.split()
         for k in range(0, len(rows), 20):
             block = rows[k:k + 20]
-            if hashlib.sha1("\n".join(t for _, t in block).encode()).hexdigest()[:6] != want[k // 20]:
+            if checksum(block) != want[k // 20]:
                 raise RuntimeError(f"{name}: the text differs from the original between line {block[0][0]} and line "
                                    f"{block[-1][0]} (it starts with: {block[0][1].strip()[:50]!r}). Re-copy that part")
         exec(compile(text, path, "exec"), globals())

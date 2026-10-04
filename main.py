@@ -7,16 +7,16 @@ part7.py (the MCP server) must stay LAST. If a part is missing or was cut while 
 import os
 
 _LOADER_PARTS = [
-    ("part1.py", -6),
+    ("part1.py", 228),
     ("part2.py", 313),
     ("part3.py", 314),
     ("part4.py", 214),
     ("part5.py", 286),
     ("part6.py", 294),
-    ("part8.py", -6),
-    ("part9.py", -6),
-    ("part10.py", -6),
-    ("part7.py", -6),
+    ("part8.py", 261),
+    ("part9.py", 164),
+    ("part10.py", 114),
+    ("part7.py", 143),
 ]
 
 

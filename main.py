@@ -1,18 +1,21 @@
 """TVibex402 loader.
 
-The code lives in part1.py ... part7.py (small files, easy to copy on a phone).
-This file runs them in order inside ONE shared namespace, so it behaves exactly like a single big file.
-If a part is missing or was cut while copying, the error says which one.
+The code lives in small files (part1.py ... part10.py) so it is easy to copy on a phone.
+This file runs them in the order below inside ONE shared namespace, so it behaves like a single big file.
+part7.py (the MCP server) must stay LAST. If a part is missing or was cut while copying, the error says which one.
 """
 import os
 
 _LOADER_PARTS = [
     ("part1.py", 228),
     ("part2.py", 313),
-    ("part3.py", 315),
+    ("part3.py", 314),
     ("part4.py", 214),
     ("part5.py", 286),
     ("part6.py", 294),
+    ("part8.py", 261),
+    ("part9.py", 164),
+    ("part10.py", 114),
     ("part7.py", 143),
 ]
 

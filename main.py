@@ -9,7 +9,7 @@ import os
 _LOADER_PARTS = [
     ("part1.py", 228),
     ("part2.py", 313),
-    ("part3.py", 314),
+    ("part3.py", 315),
     ("part4.py", 214),
     ("part5.py", 286),
     ("part6.py", 294),

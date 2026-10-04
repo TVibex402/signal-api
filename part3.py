@@ -19,7 +19,34 @@ AVOID_FLAGS = ["mint_authority_active", "freeze_authority_active", "risky_token_
 CAUTION_FLAGS = ["very_low_liquidity", "low_liquidity", "high_holder_concentration", "dominant_holder",
                  "lp_partially_locked", "brand_new_pair", "extreme_turnover"]
 AUTHORITY_FLAGS = {"mint_authority_active", "freeze_authority_active"}
-LP_FLAGS = {"lp_not_locked", "lp_partially_locked"}  # established tokens được miễn trừ LP flags
+
+
+def add_verdict(result: dict):
+    """One-line decision for agents: ok | caution | avoid (heuristic, not advice)."""
+    flags = set(result["flags"])
+    # Established tokens (e.g. regulated stablecoins) legitimately keep authorities
+    established = result["liquidity_usd"] >= 1_000_000 and (result.get("pair_age_minutes") or 0) >= 43200
+    avoid = [f for f in AVOID_FLAGS if f in flags and not (established and f in AUTHORITY_FLAGS)]
+    caution = [f for f in CAUTION_FLAGS if f in flags]
+    if established:
+        caution = [f for f in AUTHORITY_FLAGS if f in flags] + caution
+    score = result["risk_score"]
+    result["verdict"] = "avoid" if avoid or score >= 50 else "caution" if caution or score >= 25 else "ok"
+    result["verdict_reasons"] = [REASONS[f] for f in avoid + caution]
+    # "full" only when BOTH on-chain sources answered in time
+    result["verdict_confidence"] = "full" if result.get("security") and not result.get("partial") else "market_only"
+    top = "; ".join(result["verdict_reasons"][:3]) or "no major red flags found"
+    result["summary"] = (
+        f"{result.get('token') or '?'}: {result['verdict'].upper()} ({result['verdict_confidence']} data). "
+        f"{top}. Liquidity ${result['liquidity_usd']:,.0f}, risk {result['risk_score']}/100."
+    )
+    nxt = []
+    if result.get("partial"):
+        miss = [k for k, v in (result.get("sources") or {}).items() if v != "ok"]
+        nxt.append("retry in a few seconds for full on-chain data" + (f" (missing: {', '.join(miss)})" if miss else ""))
+    if result["verdict"] != "avoid":
+        nxt.append("run the exit check (GET /exit or MCP check_exit) before sizing a trade")
+    result["suggested_next"] = nxt
 
 
 # ---------- pipeline ----------

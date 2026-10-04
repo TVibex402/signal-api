@@ -19,6 +19,7 @@ AVOID_FLAGS = ["mint_authority_active", "freeze_authority_active", "risky_token_
 CAUTION_FLAGS = ["very_low_liquidity", "low_liquidity", "high_holder_concentration", "dominant_holder",
                  "lp_partially_locked", "brand_new_pair", "extreme_turnover"]
 AUTHORITY_FLAGS = {"mint_authority_active", "freeze_authority_active"}
+LP_FLAGS = {"lp_not_locked", "lp_partially_locked"}
 
 
 def add_verdict(result: dict):
@@ -26,7 +27,7 @@ def add_verdict(result: dict):
     flags = set(result["flags"])
     # Established tokens (e.g. regulated stablecoins) legitimately keep authorities
     established = result["liquidity_usd"] >= 1_000_000 and (result.get("pair_age_minutes") or 0) >= 43200
-    avoid = [f for f in AVOID_FLAGS if f in flags and not (established and f in AUTHORITY_FLAGS)]
+    avoid = [f for f in AVOID_FLAGS if f in flags and not (established and (f in AUTHORITY_FLAGS or f in LP_FLAGS))]
     caution = [f for f in CAUTION_FLAGS if f in flags]
     if established:
         caution = [f for f in AUTHORITY_FLAGS if f in flags] + caution

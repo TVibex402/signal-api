@@ -1,6 +1,6 @@
 """TVibex402 loader.
 
-The code lives in small files (part1.py ... part12.py) so it is easy to copy on a phone.
+The code lives in small files (part1.py ... part14.py) so it is easy to copy on a phone.
 This file runs them in order inside ONE shared namespace, so it behaves like a single big file.
 part7.py (the MCP server) must stay LAST.
 
@@ -23,7 +23,9 @@ _LOADER_PARTS = [
     ("part10.py", 100, "2bef81 f88fc8 a5da65 7fe0e9 9d8d7a"),
     ("part11.py", 176, "d86a06 92af86 39ff8f 75bf06 5ad6e4 d4f2f7 de4ad1 7cb671 ef4bf7"),
     ("part12.py", 92, "7f4810 568ec7 9e61a6 78d451 576456"),
-    ("part7.py", 123, "3cb58c 4f50d8 5f4f96 8d1647 de3ce3 fe58bb a57cce"),
+    ("part13.py", 287, "78d716 efc00a 12ff47 0acd55 a85d72 46255a 596e6c 8afc61 4e630f 96df20 e98fd8 bcd912 f83a8a 9c6ad6 f76e00"),
+    ("part14.py", 114, "df8203 0eb4a5 47bf27 afb8c1 2287d7 fa0444"),
+    ("part7.py", 127, "3cb58c dc8bcc 5f4f96 8d1647 05d9f8 f88499 86b940"),
 ]
 
 

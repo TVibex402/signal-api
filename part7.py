@@ -20,7 +20,7 @@ except Exception:  # noqa: BLE001
 
 MCP_INSTRUCTIONS = (
     "Solana token data and risk checks (heuristics, not financial advice). Recommended workflow: "
-    "1) check_tokens_batch for a watchlist (ranked, safest first) or check_token_risk for one token; "
+    "1) check_tokens_batch for a watchlist (ranked, safest first; use min_liq or max_age_minutes to skip junk early) or check_token_risk for one token; "
     "2) if the verdict is not 'avoid', call check_exit to see what selling would cost; "
     "3) call get_track_record once to learn how reliable past verdicts were. "
     "Always read data_quality: if completeness is 'partial' or freshness is 'stale', say so and lower your confidence. "
@@ -98,15 +98,19 @@ def _setup_mcp():
     @tool("Smart batch check")
     async def check_tokens_batch(mints: List[str], ctx: Context, include_security: bool = True, sort: str = "safest",
                                  only: Optional[str] = None, max_risk: Optional[int] = None,
-                                 top: Optional[int] = None) -> dict:
+                                 top: Optional[int] = None, min_liq: Optional[float] = None,
+                                 max_age_minutes: Optional[int] = None, min_volume_1h: Optional[float] = None) -> dict:
         """Check up to 10 tokens at once with ONE shared data request. Returns summary.headline (one sentence), results
         ranked by safety (safety_rank 1 = lowest risk) and errors for tokens that failed or are still computing.
-        sort: safest (default) | riskiest | input. only: keep these verdicts, e.g. 'ok,caution'.
-        max_risk: keep risk_score <= this. top: keep the first N after sorting."""
+        sort: safest (default) | riskiest | input | liquidity | volume_1h. only: keep these verdicts, e.g. 'ok,caution'.
+        max_risk: keep risk_score <= this. top: keep the first N after sorting.
+        min_liq (USD), max_age_minutes, min_volume_1h: cheap filters applied BEFORE the heavy checks; skipped tokens are
+        listed in `skipped` with the reason."""
         key = _mcp_key(ctx)
         try:
             return await build_batch(app.state.client, mints, include_security, sort=sort, only=only, max_risk=max_risk,
-                                     top=top, view="compact", charge=lambda cost: rate_limited(key, cost=cost))
+                                     top=top, view="compact", min_liq=min_liq, max_age_minutes=max_age_minutes,
+                                     min_volume_1h=min_volume_1h, charge=lambda cost: rate_limited(key, cost=cost))
         except HTTPException as e:
             raise ToolError(f"{e.detail} (HTTP {e.status_code})")
 

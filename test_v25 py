@@ -1,0 +1,101 @@
+"""v2.5: operator diagnostics, remembered exit checks, hypothesis flags, pricing page."""
+import asyncio
+import time
+
+import main
+from helpers import World
+
+TOK = "Tok" + "x" * 41
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def setup(world):
+    main._cache.clear()
+    main._hits.clear()
+    main._exit_seen.clear()
+    client = world.client()
+    main.app.state.client = client
+    return client
+
+
+def result(**kw):
+    r = {"token": "T", "mint": "Mint" + "x" * 40, "flags": [], "liquidity_usd": 400_000, "pair_age_minutes": 300, "dex": "raydium",
+         "security": {}, "partial": False, "sources": {}, "price_change_pct": {"1h": 5}, "buy_pressure_5m": 0.5, "buys_5m": 30, "sells_5m": 30}
+    r.update(kw)
+    main.finalize_risk(r, True)
+    main.add_verdict(r)
+    return r
+
+
+def test_hypothesis_flags_are_shown_but_not_scored():
+    chase = result(price_change_pct={"1h": 150}, buy_pressure_5m=0.95, buys_5m=60, sells_5m=2)
+    calm = result()
+    assert "late_entry_risk" in chase["flags"] and "one_sided_flow" in chase["flags"]
+    assert "late_entry_risk" not in calm["flags"]
+    assert chase["risk_score"] == calm["risk_score"] == 0 and chase["verdict"] == "ok"
+    assert "no_recent_trades" in result(buys_5m=0, sells_5m=0, buy_pressure_5m=None)["flags"]
+
+
+def test_hypothesis_flags_are_tracked_by_the_accuracy_loop():
+    for flag in ("late_entry_risk", "one_sided_flow", "no_recent_trades"):
+        assert flag in main.RISK_WEIGHTS and main.RISK_WEIGHTS[flag] == 0
+
+
+def test_no_sell_route_found_by_an_exit_check_follows_the_token():
+    w = World()
+    w.add(TOK)
+    w.jup = "no_route"
+    client = setup(w)
+    report = run(main.build_exit_report(client, TOK, [100.0]))
+    assert report["combined_verdict"] == "avoid" and report["exit"]["exit_route_found"] is False
+    main._cache.clear()
+    r, _ = run(main.build_signal(client, TOK, True))
+    assert "no_sell_route" in r["flags"] and r["verdict"] == "avoid"
+    assert not any(u.startswith("Exit cost not checked") for u in r["decision"]["unknowns"])
+
+
+def test_a_high_exit_cost_makes_later_signals_a_caution():
+    w = World()
+    w.add(TOK)
+    w.jup_loss = 0.15
+    client = setup(w)
+    assert run(main.build_exit_report(client, TOK, [100.0, 1000.0]))["combined_verdict"] == "caution"
+    main._cache.clear()
+    r, _ = run(main.build_signal(client, TOK, True))
+    assert "high_exit_cost" in r["flags"] and r["verdict"] == "caution"
+
+
+def test_an_old_exit_check_is_forgotten():
+    w = World()
+    w.add(TOK)
+    client = setup(w)
+    main._exit_seen[TOK] = (time.time() - main.EXIT_MEMORY_S - 5, "no_route")
+    r, _ = run(main.build_signal(client, TOK, True))
+    assert "no_sell_route" not in r["flags"] and r["verdict"] == "ok"
+
+
+def test_health_tells_the_operator_what_is_missing_without_secrets():
+    h = run(main.health())
+    assert h["version"] == main.VERSION and h["python"] and h["track_record"] is False
+    store = h["track_record_store"]
+    assert store["configured"] is False and "UPSTASH_REDIS_REST_URL" in store["missing_env"]
+    assert "secret" not in str(h).lower()
+
+
+def test_pricing_page_uses_the_live_numbers_and_makes_no_false_promises():
+    html = main.render_pricing()
+    assert f"{main.RATE_LIMIT} requests/min" in html and f"{main.KEY_RATE_LIMIT} requests/min" in html
+    assert "Not available yet" in html and "/pricing" in main.HOME_HTML
+
+
+def test_pricing_contact_link_must_be_https():
+    try:
+        main.CONTACT_URL = "javascript:alert(1)"
+        assert "javascript:" not in main.render_pricing()
+        main.CONTACT_URL = "https://x.com/example"
+        assert 'href="https://x.com/example"' in main.render_pricing()
+    finally:
+        main.CONTACT_URL = ""

@@ -1,4 +1,5 @@
 # ---------- v2.6: Holder Quality + Dip Absorption ----------
+# Không override with_quality nữa để tránh đệ quy với part19.
 VERSION = "2.6.0"
 app.version = VERSION
 app.openapi_schema = None
@@ -151,17 +152,8 @@ async def _save_curr_tops(client, mint: str, tops):
         pass
 
 
-_with_quality_v25 = with_quality
-
-
-def with_quality(result: dict, status: str, security: bool) -> dict:
-    out = _with_quality_v25(result, status, security)
-    # holder_quality is attached later in the async path when we have prev_tops
-    return out
-
-
 async def attach_holder_quality(client, mint: str, result: dict):
-    """Call this after security data is ready."""
+    """Gọi sau khi có security data. An toàn, không đệ quy."""
     prev = await _load_prev_tops(client, mint)
     hq = compute_holder_quality(result, prev)
     result["holder_quality"] = {
@@ -171,10 +163,8 @@ async def attach_holder_quality(client, mint: str, result: dict):
         "stability": hq["stability"],
         "absorption": hq["absorption"],
     }
-    # also surface the flags into the main flags list so scoring sees them
     for f in hq["flags"]:
         if f not in result.get("flags", []):
             result.setdefault("flags", []).append(f)
-    # remember current tops for next time
     await _save_curr_tops(client, mint, hq["top_owners"])
     return result

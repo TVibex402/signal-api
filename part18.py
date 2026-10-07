@@ -96,4 +96,85 @@ def compute_holder_quality(result, prev_tops=None):
     conc = _concentration_score(top10)
     stab = _stability_score(curr_tops, prev_tops or [])
     abso = _absorption_score(result)
-    hq = round
+    hq = round(0.40 * conc + 0.35 * stab + 0.25 * abso)
+
+    flags = []
+    if stab >= 72:
+        flags.append("holders_stable")
+    elif stab <= 38 and prev_tops:
+        flags.append("holders_churning")
+
+    if prev_tops and curr_tops:
+        prev_map = {o: p for o, p in prev_tops}
+        gained = sum(max(0.0, p - prev_map.get(o, 0.0)) for o, p in curr_tops)
+        lost = sum(max(0.0, prev_map.get(o, 0.0) - p) for o, p in curr_tops)
+        if gained >= 8.0 and gained > lost * 1.4:
+            flags.append("whale_accumulating")
+        elif lost >= 8.0 and lost > gained * 1.4:
+            flags.append("whale_dumping")
+
+    if abso >= 78:
+        flags.append("dip_absorbed")
+    elif abso <= 28:
+        flags.append("weak_absorption")
+
+    return {
+        "score": hq,
+        "flags": flags,
+        "concentration": round(conc, 1),
+        "stability": round(stab, 1),
+        "absorption": round(abso, 1),
+        "top_owners": curr_tops,
+    }
+
+
+async def _load_prev_tops(client, mint: str):
+    if not PRED_ENABLED or not client:
+        return None
+    try:
+        raw = await redis_get(client, HOLDER_CACHE_KEY.format(mint))
+        if raw:
+            import json
+            return json.loads(raw)
+    except Exception:
+        pass
+    return None
+
+
+async def _save_curr_tops(client, mint: str, tops):
+    if not PRED_ENABLED or not client or not tops:
+        return
+    try:
+        import json
+        await redis_set(client, HOLDER_CACHE_KEY.format(mint), json.dumps(tops), HOLDER_CACHE_TTL)
+    except Exception:
+        pass
+
+
+_with_quality_v25 = with_quality
+
+
+def with_quality(result: dict, status: str, security: bool) -> dict:
+    out = _with_quality_v25(result, status, security)
+    # holder_quality is attached later in the async path when we have prev_tops
+    return out
+
+
+async def attach_holder_quality(client, mint: str, result: dict):
+    """Call this after security data is ready."""
+    prev = await _load_prev_tops(client, mint)
+    hq = compute_holder_quality(result, prev)
+    result["holder_quality"] = {
+        "score": hq["score"],
+        "flags": hq["flags"],
+        "concentration": hq["concentration"],
+        "stability": hq["stability"],
+        "absorption": hq["absorption"],
+    }
+    # also surface the flags into the main flags list so scoring sees them
+    for f in hq["flags"]:
+        if f not in result.get("flags", []):
+            result.setdefault("flags", []).append(f)
+    # remember current tops for next time
+    await _save_curr_tops(client, mint, hq["top_owners"])
+    return result

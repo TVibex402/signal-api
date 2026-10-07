@@ -170,3 +170,20 @@ token, the condition that would make it go away. They are conditions, not predic
 /methodology lists the hypotheses under test with the promotion and drop rules fixed in advance, and their current status.
 The accuracy page also shows the biggest surprises: verdicts that were wrong.
 """
+# ---------- v2.6.1: stronger resilience against DexScreener 429 ----------
+STALE_MAX = max(STALE_MAX, 900)          # cho phép stale tới 15 phút
+PARTIAL_TTL = max(PARTIAL_TTL, 15)       # partial sống lâu hơn một chút
+
+_original_homeostat = homeostat
+
+def homeostat() -> int:
+    """Khi DexScreener bị 429/degraded thì giữ cache lâu hơn nhiều."""
+    global CACHE_TTL
+    status = (src_status().get("dexscreener") or {}).get("status")
+    if status == "down":
+        CACHE_TTL = BASE_CACHE_TTL * 6      # 3 phút
+    elif status == "degraded":
+        CACHE_TTL = BASE_CACHE_TTL * 3      # 1.5 phút
+    else:
+        CACHE_TTL = BASE_CACHE_TTL
+    return CACHE_TTL

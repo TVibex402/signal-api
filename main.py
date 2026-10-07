@@ -1,107 +1,81 @@
-# TVibex402
+"""TVibex402 loader.
 
-Free Solana token signal API for AI agents & bots.
+The code lives in small files (part1.py ... part19.py) so it is easy to copy on a phone.
+This file runs them in order inside ONE shared namespace, so it behaves like a single big file.
+part7.py (the MCP server) must stay LAST.
 
-Market data from DexScreener · On-chain from Solana RPC · LP lock from RugCheck · Exit quotes from Jupiter.
+Each part is checked before it runs. Blank lines and trailing spaces do not matter. If the copy was cut,
+or one line is different, the error says which part and which line numbers to re-check.
+"""
+import hashlib
+import os
 
-**Not financial advice.** Verdicts and risk scores are heuristics, not a security audit. The project publishes how often
-its verdicts were right (`/accuracy`), including when they were wrong.
+# (file, number of non-blank lines, short checksum of every block of 20 non-blank lines)
+# A checksum of "SKIP" means: run the file without checking it.
+_LOADER_PARTS = [
+    ("part1.py", 188, "e743de c1ac12 601c39 4d9d2f 4a4aec 05b54d 325cc3 3ebd7b 2a67a4 505939"),
+    ("part2.py", 284, "dd2adb 5c8bc2 579e5d 5ab3be 89399b 1d9ab1 e238d9 dfeb14 3f87da 3d1956 c72169 9d2495 282293 beb4a9 a9f93e"),
+    ("part3.py", 277, "47f898 026ec3 d51ae5 17295c 3833d1 bb6952 1bdf56 bb6399 6a0e6c 492db2 75f857 881805 7a892c efed49"),
+    ("part4.py", 193, "3ba2c3 f8144d 009b88 6871a4 4598d2 4a8aa6 cba613 3a0bb7 bb97b3 6f9c9b"),
+    ("part5.py", 259, "1383cd 624af2 e42df9 b0a03d 5093d2 ff2cf4 dd3f20 de31db 68ab34 554169 6d09d7 287100 124e0f"),
+    ("part6.py", 265, "7bfb4f c5b492 560dc6 071b1d a28aee 2012e2 4ba7b7 caa55c a1b6d2 ea3935 dfddfe 5ad147 fd85cc b73b36"),
+    ("part8.py", 230, "aa054f b95c6b 2c42db 9f4cdf 3bed1d bc282a 01499a 749f79 aeb83d 2d4e7b 619823 6cd0af"),
+    ("part9.py", 141, "4ef5cd ab83e5 a63d4e 9a89b6 da830f ad37b9 5f3244 17b09e"),
+    ("part10.py", 100, "2bef81 f88fc8 a5da65 7fe0e9 9d8d7a"),
+    ("part11.py", 176, "d86a06 92af86 39ff8f 75bf06 5ad6e4 d4f2f7 de4ad1 7cb671 ef4bf7"),
+    ("part12.py", 92, "7f4810 568ec7 9e61a6 78d451 576456"),
+    ("part13.py", 287, "78d716 efc00a 12ff47 0acd55 a85d72 46255a 596e6c 8afc61 4e630f 96df20 e98fd8 bcd912 f83a8a 9c6ad6 f76e00"),
+    ("part14.py", 114, "df8203 0eb4a5 47bf27 afb8c1 2287d7 fa0444"),
+    ("part15.py", 198, "2340e5 c1ec7b e87bd8 3d110d abae99 8ef8c5 88aa14 3b397f f6b7ca 5af43d"),
+    ("part16.py", 89, "6c30d7 15b149 84b88b 57bfc7 47ed07"),
+    ("part17.py", 131, "66d57d 9d984d 1ccb46 2da000 2e320e 5cea66 3b156c"),
+    ("part18.py", 0, "SKIP"),          # temporary – skip line count + checksum
+    ("part19.py", 0, "SKIP"),          # temporary – skip line count + checksum
+    ("part7.py", 127, "3cb58c dc8bcc 5f4f96 8d1647 05d9f8 f88499 86b940"),
+]
 
-## Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/` | Homepage (try it live) |
-| GET | `/signal?mint=ADDRESS` | Full signal, verdict, decision object (`would_change_if`, `valid_for_s`) and holder quality (part18) for one token |
-| GET | `/signals?mints=A,B,C` | Smart batch (max 10): ranked, filters `min_liq`, `max_age_minutes`, `min_volume_1h`, `sort`, `only`, `max_risk`, `top` |
-| GET | `/exit?mint=ADDRESS&sizes=100,1000` | Sell cost via Jupiter (a quote is not proof a sell will succeed) |
-| GET | `/stream?mint=ADDRESS` | Live updates for one token (Server-Sent Events) |
-| GET | `/accuracy` | Public accuracy dashboard |
-| GET | `/stats` | The same measurements as JSON (windows, precision / recall vs a simple baseline) |
-| GET | `/methodology` | Exact rules, thresholds, weights in use |
-| GET | `/ledger` | Tamper-evident hash chain of every recorded verdict |
-| GET | `/pricing` | Plans, live limits, how to get an API key |
-| GET | `/metrics` | Request counts, cache hit rate, latency, source health |
-| GET | `/health` | Status and what is switched on (shows missing settings, never secrets) |
-| GET | `/whoami` | The client IP the server sees (use it to check `TRUSTED_PROXY_HOPS`) |
-| GET | `/llms.txt` | Agent-friendly docs |
-| GET | `/docs` | OpenAPI |
-| POST | `/mcp` | Remote MCP server for Claude and other agents |
+def _load_parts():
+    def checksum(block):
+        return hashlib.sha1("\n".join(text for _, text in block).encode()).hexdigest()[:6]
 
-```bash
-curl "https://YOUR-SERVICE.onrender.com/signal?mint=So11111111111111111111111111111111111111112"
-```
+    def first_difference(rows, sums):
+        want = sums.split()
+        for k in range(0, len(rows), 20):
+            block = rows[k:k + 20]
+            if k // 20 >= len(want):
+                return f"There is extra text after line {block[0][0]}."
+            if checksum(block) != want[k // 20]:
+                return (f"The first difference is between line {block[0][0]} and line {block[-1][0]} "
+                        f"(it starts with: {block[0][1].strip()[:50]!r}). Look for a line that was split in two, "
+                        f"repeated, or added there.")
+        return "The start matches; the end of the file is missing or has extra lines."
 
-## Turn on the track record (5 minutes)
+    folder = os.path.dirname(os.path.abspath(__file__))
+    for name, expected, sums in _LOADER_PARTS:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            raise RuntimeError(f"{name} is missing: upload all part files next to main.py")
+        with open(path, encoding="utf-8-sig") as fh:
+            text = fh.read()
+        rows = [(i + 1, line.rstrip()) for i, line in enumerate(text.splitlines()) if line.strip()]
 
-Without it `/accuracy` says "not switched on" and no verdict is judged. It needs a free Upstash Redis database:
+        if sums == "SKIP":
+            print(f"[loader] {name}: not checked ({len(rows)} non-blank lines)")
+            exec(compile(text, path, "exec"), globals())
+            continue
 
-1. Create a Redis database at upstash.com (free plan).
-2. Copy the **REST URL** and **REST token** (not the `redis://` address).
-3. On Render: your service, Environment, add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, save, redeploy.
-4. Open `/health`: `track_record` must be `true` and `track_record_store.reachable` must be `true`.
-5. Keep the free instance awake so it can judge verdicts about a day later: an uptime monitor calling `/health` every 5 minutes.
+        if len(rows) != expected:
+            raise RuntimeError(f"{name} has {len(rows)} non-blank lines but should have {expected}. "
+                               f"{first_difference(rows, sums)}")
+        want = sums.split()
+        for k in range(0, len(rows), 20):
+            block = rows[k:k + 20]
+            if checksum(block) != want[k // 20]:
+                raise RuntimeError(f"{name}: the text differs from the original between line {block[0][0]} and line "
+                                   f"{block[-1][0]} (it starts with: {block[0][1].strip()[:50]!r}). Re-copy that part")
+        exec(compile(text, path, "exec"), globals())
 
-Rates on `/accuracy` stay hidden until a group has 20+ judged verdicts. Do not quote accuracy numbers before that.
 
-## Environment variables
-
-| Variable | Purpose |
-|---|---|
-| `SOLANA_RPC_URL` | Primary RPC (a free Helius or QuickNode key is strongly recommended; the public RPC is rate limited) |
-| `SOLANA_RPC_FALLBACKS` | Comma-separated fallback RPCs |
-| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Enable the track record and the ledger |
-| `JUPITER_API_KEY` | Higher Jupiter rate limit for exit quotes |
-| `API_KEYS` | `secret1:label1,secret2:label2`: keys that get a higher rate limit via the `X-API-Key` header |
-| `KEY_RATE_LIMIT` | Requests/min for keyed clients (default 300) |
-| `GLOBAL_KEY_RESERVE` | Upstream requests/min reserved for keyed clients (default 50) |
-| `CONTACT_URL` | `https://` link shown on `/pricing` for requesting a key |
-| `AUTO_TUNE` | `true` lets measured outcomes adjust risk weights (default off) |
-| `TRUSTED_PROXY_HOPS` | Proxy hops for the real client IP (Render = 1). Check with `/whoami` |
-| `STREAM_MAX_PER_IP`, `STREAM_MAX_WATCHED`, `STREAM_MAX_SECONDS`, `STREAM_INTERVAL_S` | Limits for `/stream` |
-| `PYTHON_VERSION` | Optional on Render, e.g. `3.12.7` (see below) |
-
-## What a signal contains
-
-Price, FDV, market cap, liquidity, pair age · price change 5m / 1h / 6h / 24h · volume and buy/sell pressure · risk score, flags and a
-verdict (ok / caution / avoid) · the **decision object**: blockers, cautions, positives, unknowns, `would_change_if` (what would make each
-reason go away), `valid_for_s` (how long the reading stays useful: 10s for fast tokens, 30s normally, 120s for majors, 0 when stale) ·
-security: mint and freeze authority, holder concentration, LP lock, Token-2022 details · holder quality score and flags (part18) ·
-data quality: freshness, completeness, confidence · `track_record_context` once enough verdicts have been judged.
-
-## Hypotheses
-
-Some flags are shown and measured but not scored (`late_entry_risk`, `one_sided_flow`, `no_recent_trades`). The rules for promoting
-or dropping them are written down before the data arrives (`/methodology`), and `/accuracy` also shows the biggest surprises:
-verdicts that turned out wrong.
-
-## Tests and CI
-
-```bash
-pip install -r requirements.txt pytest
-pytest -q
-```
-
-`.github/workflows/ci.yml` runs the same on every push, so a bad copy shows up as a red check on GitHub instead of a failed
-deploy. The tests use fake upstreams: no network and no real keys.
-
-## How the code is organised
-
-`main.py` is a small loader. The code lives in `part1.py` ... `part19.py` and runs in the order listed in `main.py`
-(`part7.py`, the MCP server, always loads last). A checksum of `SKIP` in `main.py` runs a file without checking it: use it only while a file is being edited. All files must sit in the same folder. The loader checks every part and says
-which file and which lines to re-check if a copy went wrong. Later parts replace or extend functions from earlier ones, so read
-`main.py` for the order.
-
-## Deploy notes
-
-- Python version: Render reads `PYTHON_VERSION` or a `.python-version` file (this repo has one: `3.12`). `runtime.txt` is
-  Heroku's format and is ignored by Render, so it can be deleted.
-- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-- Optional Docker: `docker build -t tvibex402 . && docker run -p 8080:8080 tvibex402`. The track record needs the Upstash REST
-  API, so use a free Upstash database even locally.
-
-## Limits
-
-- Free: 30 requests/min per IP. With `X-API-Key`: higher. A global upstream budget protects the DexScreener quota.
-- No uptime guarantee on the free host. Retry after a 503 (the response says when).
-- Only tokens that people query are measured, not a random sample of the market.
+_load_parts()
+del _load_parts

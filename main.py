@@ -1,6 +1,6 @@
 """TVibex402 loader.
 
-The code lives in small files (part1.py ... part18.py) so it is easy to copy on a phone.
+The code lives in small files (part1.py ... part19.py) so it is easy to copy on a phone.
 This file runs them in order inside ONE shared namespace, so it behaves like a single big file.
 part7.py (the MCP server) must stay LAST.
 
@@ -11,6 +11,7 @@ import hashlib
 import os
 
 # (file, number of non-blank lines, short checksum of every block of 20 non-blank lines)
+# A checksum of "SKIP" means: run the file without checking it.
 _LOADER_PARTS = [
     ("part1.py", 188, "e743de c1ac12 601c39 4d9d2f 4a4aec 05b54d 325cc3 3ebd7b 2a67a4 505939"),
     ("part2.py", 284, "dd2adb 5c8bc2 579e5d 5ab3be 89399b 1d9ab1 e238d9 dfeb14 3f87da 3d1956 c72169 9d2495 282293 beb4a9 a9f93e"),
@@ -28,7 +29,8 @@ _LOADER_PARTS = [
     ("part15.py", 198, "2340e5 c1ec7b e87bd8 3d110d abae99 8ef8c5 88aa14 3b397f f6b7ca 5af43d"),
     ("part16.py", 89, "6c30d7 15b149 84b88b 57bfc7 47ed07"),
     ("part17.py", 131, "66d57d 9d984d 1ccb46 2da000 2e320e 5cea66 3b156c"),
-    ("part18.py", 0, "SKIP"),          # temporary – skip line count + checksum
+    ("part18.py", 0, "SKIP"),          # your file: not checked yet (send it and it gets a real checksum)
+    ("part19.py", 136, "074924 4fd944 d5aacd 2ca839 1f9b4c 789492 5524ae"),
     ("part7.py", 127, "3cb58c dc8bcc 5f4f96 8d1647 05d9f8 f88499 86b940"),
 ]
 
@@ -58,9 +60,8 @@ def _load_parts():
             text = fh.read()
         rows = [(i + 1, line.rstrip()) for i, line in enumerate(text.splitlines()) if line.strip()]
 
-        # Temporary skip for part18
         if sums == "SKIP":
-            print(f"[loader] {name}: checksum + line count temporarily skipped ({len(rows)} non-blank lines)")
+            print(f"[loader] {name}: not checked ({len(rows)} non-blank lines)")
             exec(compile(text, path, "exec"), globals())
             continue
 

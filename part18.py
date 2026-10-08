@@ -167,7 +167,8 @@ async def attach_holder_quality(client, mint: str, result: dict):
         if f not in result.get("flags", []):
             result.setdefault("flags", []).append(f)
     await _save_curr_tops(client, mint, hq["top_owners"])
-    return result# ---------- gắn holder_quality vào pipeline chính ----------
+    return result
+# ---------- gắn holder_quality vào pipeline chính ----------
 _build_signal_v26 = build_signal
 
 

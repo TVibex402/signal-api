@@ -187,3 +187,32 @@ def homeostat() -> int:
     else:
         CACHE_TTL = BASE_CACHE_TTL
     return CACHE_TTL
+# ---------- v2.6.2: smarter DexScreener 429 handling ----------
+_fetch_dex_v26 = fetch_dex
+
+
+async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
+    t0 = time.time()
+    try:
+        resp = await client.get(DEX_URL.format(mint=mint))
+        if resp.status_code == 429:
+            src_log("dexscreener", False, t0)
+            # báo client đợi lâu hơn, đồng thời đánh dấu degraded để homeostat kéo dài cache
+            raise HTTPException(
+                status_code=503,
+                detail="DexScreener rate limit (429). Using longer cache window.",
+                headers={"Retry-After": "30"},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        src_log("dexscreener", True, t0)
+        return data
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError):
+        src_log("dexscreener", False, t0)
+        raise HTTPException(
+            status_code=503,
+            detail="Market data source (DexScreener) is unavailable, retry in a few seconds",
+            headers={"Retry-After": "15"},
+        )

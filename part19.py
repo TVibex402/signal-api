@@ -375,4 +375,38 @@ def finalize_risk(result: dict, onchain: bool):
             flags.append("price_collapse_24h")
     return _finalize_risk_v266(result, onchain)
 
+# ---------- v2.6.8 (paste at the END of part19.py, after the v2.6.7 block) ----------
+# 1) dead_pool / price_collapse_24h did not show up in v2.6.7: the finalize_risk hook either runs before
+#    no_recent_trades exists or is bypassed. Compute them at the very end instead, from raw fields.
+# 2) A batch answered 404 "No Solana pair found" for tokens that a single call finds. Do not let an EMPTY
+#    batch answer count as truth: leave the token out, so the caller falls back to the single fetch_dex.
+VERSION = "2.6.8"
+app.version = VERSION
+app.openapi_schema = None
+
+_with_quality_before_shadow = with_quality
+
+
+def with_quality(result: dict, status: str, security: bool) -> dict:
+    out = _with_quality_before_shadow(result, status, security)
+    flags = out.get("flags")
+    if isinstance(flags, list):
+        quiet = "no_recent_trades" in flags or (out.get("volume_1h") or 0) == 0
+        if (out.get("liquidity_usd") or 0) < DEAD_POOL_LIQ_USD and quiet and "dead_pool" not in flags:
+            flags.append("dead_pool")
+        change = (out.get("price_change_pct") or {}).get("24h")
+        if change is not None and change <= COLLAPSE_24H_PCT and "price_collapse_24h" not in flags:
+            flags.append("price_collapse_24h")
+    return out
+
+
+_fetch_dex_many_before_empty_guard = fetch_dex_many
+
+
+async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optional[Dict[str, dict]]:
+    got = await _fetch_dex_many_before_empty_guard(client, mints)
+    if got is None:
+        return None
+    return {m: v for m, v in got.items() if v.get("pairs")}
+
 

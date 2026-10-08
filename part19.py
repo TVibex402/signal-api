@@ -323,3 +323,28 @@ def with_quality(result: dict, status: str, security: bool) -> dict:
         else:
             out.pop("flags_not_scored", None)
     return out
+# ---------- v2.6.6: one shared 429 cooldown for EVERY DexScreener call (paste at the END of part19.py) ----------
+# part4 and part15 call DEX_URL straight through client.get() (batches of `ask`), so they never saw the cooldown.
+# Guarding client.get itself covers every part at once, without editing them.
+# Needs the v2.6.3 block above it (_DEX_COOLDOWN and _retry_after_seconds).
+VERSION = "2.6.6"
+app.version = VERSION
+app.openapi_schema = None
+
+if not getattr(httpx.AsyncClient.get, "_dex_guard", False):
+    _client_get_v265 = httpx.AsyncClient.get
+
+    async def _guarded_get(self, url, *args, **kwargs):
+        if isinstance(url, str) and "api.dexscreener.com" in url:
+            if _DEX_COOLDOWN["until"] > time.time():
+                # callers already catch httpx.HTTPError, so they simply skip this round
+                raise httpx.ConnectError("DexScreener cooling down after 429")
+            resp = await _client_get_v265(self, url, *args, **kwargs)
+            if resp.status_code == 429:
+                _DEX_COOLDOWN["until"] = time.time() + _retry_after_seconds(resp)
+            return resp
+        return await _client_get_v265(self, url, *args, **kwargs)
+
+    _guarded_get._dex_guard = True
+    httpx.AsyncClient.get = _guarded_get
+

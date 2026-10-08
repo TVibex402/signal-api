@@ -347,4 +347,32 @@ if not getattr(httpx.AsyncClient.get, "_dex_guard", False):
 
     _guarded_get._dex_guard = True
     httpx.AsyncClient.get = _guarded_get
+# ---------- v2.6.7: shadow flags, measured but NOT scored (paste at the END of part19.py) ----------
+# part8 scores with ACTIVE_WEIGHTS.get(flag, 0), so a flag with no weight changes neither risk_score nor verdict.
+# The flags show up in results and are registered as hypotheses, so /methodology can measure their lift
+# before anyone decides to give them a weight or add them to AVOID_FLAGS.
+VERSION = "2.6.7"
+app.version = VERSION
+app.openapi_schema = None
+
+DEAD_POOL_LIQ_USD = 5_000      # below this, with no recent trades, a sell is unlikely to go through
+COLLAPSE_24H_PCT = -50.0       # price already lost half of its value in 24h
+
+HYPOTHESES["dead_pool"] = "a pool under $5k liquidity with no recent trades is effectively untradeable (should be avoid)"
+HYPOTHESES["price_collapse_24h"] = "a token that already lost 50%+ in 24h keeps losing (momentum of the dump)"
+
+_finalize_risk_v266 = finalize_risk
+
+
+def finalize_risk(result: dict, onchain: bool):
+    flags = result.get("flags")
+    if isinstance(flags, list):
+        if (result.get("liquidity_usd") or 0) < DEAD_POOL_LIQ_USD and "no_recent_trades" in flags \
+                and "dead_pool" not in flags:
+            flags.append("dead_pool")
+        change = (result.get("price_change_pct") or {}).get("24h")
+        if change is not None and change <= COLLAPSE_24H_PCT and "price_collapse_24h" not in flags:
+            flags.append("price_collapse_24h")
+    return _finalize_risk_v266(result, onchain)
+
 

@@ -216,3 +216,21 @@ async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
             detail="Market data source (DexScreener) is unavailable, retry in a few seconds",
             headers={"Retry-After": "15"},
         )
+# ---------- Homepage: retry button when 429/503 ----------
+_old_get = """if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+esc(data.detail||'Failed')+'</div>'}"""
+
+_new_get = """if(!res.ok){
+  const retry=parseInt(res.headers.get('Retry-After')||'30',10);
+  let left=retry;
+  result.innerHTML='<div style="color:#ff4d6d;margin-bottom:10px">Error: '+esc(data.detail||'Failed')+'</div>'
+    +'<button id="retryBtn" style="margin-top:4px;padding:8px 16px;border-radius:8px;border:none;background:linear-gradient(90deg,#7c5cff,#00d4aa);color:#fff;font-weight:600;cursor:pointer">Thử lại sau '+left+'s</button>';
+  const rb=document.getElementById('retryBtn');
+  const t=setInterval(()=>{
+    left--;
+    if(left<=0){clearInterval(t);rb.textContent='Thử lại ngay';rb.disabled=false;rb.onclick=()=>getSignal()}
+    else{rb.textContent='Thử lại sau '+left+'s';rb.disabled=true}
+  },1000);
+}"""
+
+if _old_get in HOME_HTML:
+    HOME_HTML = HOME_HTML.replace(_old_get, _new_get)

@@ -167,4 +167,15 @@ async def attach_holder_quality(client, mint: str, result: dict):
         if f not in result.get("flags", []):
             result.setdefault("flags", []).append(f)
     await _save_curr_tops(client, mint, hq["top_owners"])
-    return result
+    return result# ---------- gắn holder_quality vào pipeline chính ----------
+_build_signal_v26 = build_signal
+
+
+async def build_signal(client: httpx.AsyncClient, mint: str, security: bool, prefetched: Optional[dict] = None):
+    result, status = await _build_signal_v26(client, mint, security, prefetched)
+    if security and result.get("security"):
+        try:
+            result = await attach_holder_quality(client, mint, result)
+        except Exception:
+            pass  # không làm hỏng signal nếu Redis lỗi
+    return result, status

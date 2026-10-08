@@ -305,3 +305,21 @@ HOME_HTML = HOME_HTML.replace("Thử lại sau ", "Retry in ").replace("Thử l�
 # Do not fail silently if the homepage patch from part19 did not match
 if "retryBtn" not in HOME_HTML:
     print("[part20] warning: homepage retry button was NOT applied (the original JS line has changed)")
+# ---------- v2.6.5: majors no longer list LP flags under flags_not_scored (paste at the END of part19.py) ----------
+# finalize_risk (part8) builds flags_not_scored before with_quality runs, so the v2.6.3 filter on `flags` missed it.
+VERSION = "2.6.5"
+app.version = VERSION
+app.openapi_schema = None
+
+_with_quality_v264 = with_quality
+
+
+def with_quality(result: dict, status: str, security: bool) -> dict:
+    out = _with_quality_v264(result, status, security)
+    if out.get("asset_class") == "major" and out.get("flags_not_scored"):
+        left = [f for f in out["flags_not_scored"] if f not in MAJOR_NOISE_FLAGS]
+        if left:
+            out["flags_not_scored"] = left
+        else:
+            out.pop("flags_not_scored", None)
+    return out

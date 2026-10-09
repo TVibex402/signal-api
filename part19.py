@@ -482,3 +482,32 @@ if _old_get in HOME_HTML:
     HOME_HTML = HOME_HTML.replace(_old_get, _new_get)
 elif "retryBtn" not in HOME_HTML:
     print("[part19] warning: homepage retry button was NOT applied (the original JS line has changed)")
+
+
+# ---------- favicon (inline SVG, no static file needed) ----------
+_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#9945FF"/>
+      <stop offset="100%" stop-color="#14F195"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#070b12"/>
+  <text x="32" y="44" text-anchor="middle" font-family="system-ui,sans-serif"
+        font-size="28" font-weight="800" fill="url(#g)">T</text>
+</svg>"""
+
+_FAVICON_LINK = '<link rel="icon" href="/favicon.ico" type="image/svg+xml">'
+if _FAVICON_LINK not in HOME_HTML and "<title>" in HOME_HTML:
+    HOME_HTML = HOME_HTML.replace(
+        "<title>",
+        _FAVICON_LINK + "\n<title>",
+        1,
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    from fastapi.responses import Response
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})

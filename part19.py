@@ -409,4 +409,22 @@ async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optiona
         return None
     return {m: v for m, v in got.items() if v.get("pairs")}
 
+# ---------- v2.6.9 (paste at the END of part19.py, after the v2.6.8 block) ----------
+# SOL/USDC/USDT have a huge number of pairs. In a shared multi-mint request they appear to crowd out
+# low-liquidity tokens (cat vanished from the batch whenever SOL was in it). Majors are served from cache
+# for 120s anyway, so they are kept out of the shared request: when their cache expires, the caller
+# fetches them on their own through the single fetch_dex path (same cooldown, same stale fallback).
+VERSION = "2.6.9"
+app.version = VERSION
+app.openapi_schema = None
+
+_fetch_dex_many_with_majors = fetch_dex_many
+
+
+async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optional[Dict[str, dict]]:
+    rest = [m for m in mints if m not in MAJOR_ASSETS]
+    if not rest:
+        return {}  # only majors asked: nothing to batch, callers use the single path
+    return await _fetch_dex_many_with_majors(client, rest)
+
 

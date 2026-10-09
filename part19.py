@@ -426,5 +426,35 @@ async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optiona
     if not rest:
         return {}  # only majors asked: nothing to batch, callers use the single path
     return await _fetch_dex_many_with_majors(client, rest)
+# ---------- v2.7.0 (paste at the END of part19.py, after the v2.6.9 block) ----------
+# Soli Deo Gloria - to the glory of God alone.
+# Work wholeheartedly, as working for the Lord (Colossians 3:23).
+# May this product be honest, useful to the people who rely on it, and never promise what it cannot keep.
+#
+# RugCheck gets the same protection as DexScreener: after a 429, stop calling it for Retry-After seconds.
+# Callers already turn an httpx error into sources.rugcheck = "missing" (a partial answer), so during a
+# cooldown they answer at once with partial data instead of waiting on a source that is refusing us.
+VERSION = "2.7.0"
+app.version = VERSION
+app.openapi_schema = None
+
+_RUGCHECK_COOLDOWN = {"until": 0.0}
+
+if not getattr(httpx.AsyncClient.get, "_rugcheck_guard", False):
+    _client_get_before_rugcheck = httpx.AsyncClient.get  # already includes the DexScreener guard
+
+    async def _rugcheck_guarded_get(self, url, *args, **kwargs):
+        if isinstance(url, str) and "api.rugcheck.xyz" in url:
+            if _RUGCHECK_COOLDOWN["until"] > time.time():
+                raise httpx.ConnectError("RugCheck cooling down after 429")
+            resp = await _client_get_before_rugcheck(self, url, *args, **kwargs)
+            if resp.status_code == 429:
+                _RUGCHECK_COOLDOWN["until"] = time.time() + _retry_after_seconds(resp)
+            return resp
+        return await _client_get_before_rugcheck(self, url, *args, **kwargs)
+
+    _rugcheck_guarded_get._rugcheck_guard = True
+    httpx.AsyncClient.get = _rugcheck_guarded_get
+
 
 

@@ -423,5 +423,3 @@ async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
         return {"pairs": pairs}
 
 
-async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optional[Dict[str, dict]]:
-    """ONE DexScreener request for up to 30 mints. Returns {mint: {"pairs": 

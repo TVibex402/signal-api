@@ -455,6 +455,142 @@ if not getattr(httpx.AsyncClient.get, "_rugcheck_guard", False):
 
     _rugcheck_guarded_get._rugcheck_guard = True
     httpx.AsyncClient.get = _rugcheck_guarded_get
+# ---------- v2.7.1: GeckoTerminal fallback (paste at the END of part19.py, after the v2.7.0 block) ----------
+# When DexScreener refuses (429 / cooldown / outage), ask GeckoTerminal for the token's pools and rebuild them in
+# DexScreener's shape, so everything downstream (flags, score, verdict) runs unchanged. The answer is marked with
+# source "geckoterminal" and its confidence is capped, so callers can see it is a fallback.
+# Needs the v2.6.3 block (_retry_after_seconds). If GeckoTerminal also fails, the original error is raised as before.
+VERSION = "2.7.1"
+app.version = VERSION
+app.openapi_schema = None
+
+_GT_URL = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}/pools?include=base_token,quote_token&page=1"
+_GT_HEADERS = {"Accept": "application/json;version=20230302"}
+_GT_COOLDOWN = {"until": 0.0}
+_GT_SEM = asyncio.Semaphore(2)
+_FALLBACK_MINTS: Dict[str, float] = {}   # mint -> when its data last came from the fallback
+_GT_CONFIDENCE_CAP = 0.7
+
+
+def _gt_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gt_ms(iso):
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def gt_to_dex_pairs(payload: dict, mint: str) -> list:
+    """GeckoTerminal pools -> DexScreener-style pairs where `mint` is always the base token."""
+    toks = {}
+    for inc in payload.get("included") or []:
+        a = inc.get("attributes") or {}
+        if a.get("address"):
+            toks[a["address"]] = {"address": a["address"], "name": a.get("name"), "symbol": a.get("symbol")}
+    pairs = []
+    for pool in payload.get("data") or []:
+        a, rel = pool.get("attributes") or {}, pool.get("relationships") or {}
+
+        def addr(key):
+            tid = (((rel.get(key) or {}).get("data")) or {}).get("id") or ""
+            return tid.split("_", 1)[-1] or None
+
+        base, quote = addr("base_token"), addr("quote_token")
+        if mint == base:
+            ours, other, price, idx = base, quote, a.get("base_token_price_usd"), 0
+        elif mint == quote:
+            ours, other, price, idx = quote, base, a.get("quote_token_price_usd"), 1
+        else:
+            continue
+        names = str(a.get("name") or "").split(" / ")
+        base_tok = toks.get(ours) or {"address": ours, "symbol": names[idx] if len(names) == 2 else None}
+        tx, vol, chg = a.get("transactions") or {}, a.get("volume_usd") or {}, a.get("price_change_percentage") or {}
+        pairs.append({
+            "chainId": "solana",
+            "dexId": (((rel.get("dex") or {}).get("data")) or {}).get("id"),
+            "pairAddress": a.get("address"),
+            "baseToken": base_tok,
+            "quoteToken": toks.get(other) or {"address": other},
+            "priceUsd": price,
+            "txns": {k: {"buys": (tx.get(k) or {}).get("buys"), "sells": (tx.get(k) or {}).get("sells")}
+                     for k in ("m5", "h1", "h24") if k in tx},
+            "volume": {k: _gt_float(vol.get(k)) for k in ("m5", "h1", "h6", "h24") if k in vol},
+            "priceChange": {k: _gt_float(chg.get(k)) for k in ("m5", "h1", "h6", "h24") if k in chg},
+            "liquidity": {"usd": _gt_float(a.get("reserve_in_usd"))},
+            "fdv": _gt_float(a.get("fdv_usd")),
+            "marketCap": _gt_float(a.get("market_cap_usd")),
+            "pairCreatedAt": _gt_ms(a.get("pool_created_at")),
+        })
+    pairs.sort(key=lambda p: (p["liquidity"]["usd"] or 0), reverse=True)
+    return pairs
+
+
+async def _gt_fetch(client, mint: str):
+    if _GT_COOLDOWN["until"] > time.time():
+        return None
+    async with _GT_SEM:
+        try:
+            resp = await client.get(_GT_URL.format(mint=mint), headers=_GT_HEADERS, timeout=8.0)
+        except (httpx.HTTPError, asyncio.TimeoutError):
+            return None
+        if resp.status_code == 429:
+            _GT_COOLDOWN["until"] = time.time() + _retry_after_seconds(resp, 60)
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            return gt_to_dex_pairs(resp.json(), mint) or None
+        except Exception:  # noqa: BLE001
+            return None
+
+
+_fetch_dex_before_gt = fetch_dex
+
+
+async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
+    try:
+        data = await _fetch_dex_before_gt(client, mint)
+        _FALLBACK_MINTS.pop(mint, None)  # DexScreener is back for this token
+        return data
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        pairs = await _gt_fetch(client, mint)
+        if not pairs:
+            raise  # fallback failed too: report the original DexScreener problem
+        _FALLBACK_MINTS[mint] = time.time()
+        return {"pairs": pairs}
+
+
+_with_quality_before_gt = with_quality
+
+
+def with_quality(result: dict, status: str, security: bool) -> dict:
+    out = _with_quality_before_gt(result, status, security)
+    if out.get("mint") in _FALLBACK_MINTS:
+        out["source"] = "geckoterminal"
+        out["source_note"] = ("DexScreener was rate-limiting, so market data comes from GeckoTerminal "
+                              "(fewer fields, lower confidence)")
+        dq = out.get("data_quality")
+        if isinstance(dq, dict):
+            dq = dict(dq, fallback_source="geckoterminal")
+            dq["data_confidence"] = min(dq.get("data_confidence", 1.0), _GT_CONFIDENCE_CAP)
+            out["data_quality"] = dq
+        d = out.get("decision")
+        if isinstance(d, dict):
+            d = dict(d)
+            d["confidence"] = min(d.get("confidence", 1.0), _GT_CONFIDENCE_CAP)
+            d["unknowns"] = list(d.get("unknowns") or []) + ["Market data came from GeckoTerminal (DexScreener was rate-limiting)"]
+            out["decision"] = d
+    return out
+
 
 
 

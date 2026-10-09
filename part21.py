@@ -6,7 +6,7 @@ app.openapi_schema = None
 
 SEED_ENABLED = (os.getenv("SEED_TRAFFIC") or "true").lower() in ("1", "true", "yes")
 SEED_INTERVAL_S = max(180, int(os.getenv("SEED_INTERVAL_S", "900")))  # default 15 min between seeds
-SEED_MAX_PER_DAY = max(5, int(os.getenv("SEED_MAX_PER_DAY", "93")))   # hard cap
+SEED_MAX_PER_DAY = max(5, int(os.getenv("SEED_MAX_PER_DAY", "40")))   # hard cap
 _SEED_BOOST = "https://api.dexscreener.com/token-boosts/top/v1"
 _SEED_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 _seed_state = {"day": "", "count": 0, "last": 0.0, "last_mint": None, "last_ok": False, "errors": 0}

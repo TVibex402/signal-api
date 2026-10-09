@@ -424,4 +424,61 @@ async def fetch_dex(client: httpx.AsyncClient, mint: str) -> dict:
 
 
 async def fetch_dex_many(client: httpx.AsyncClient, mints: List[str]) -> Optional[Dict[str, dict]]:
-    """ONE DexScreener request for up to 30 mints. Returns {mint: {"pairs": 
+    """ONE DexScreener request for up to 30 mints. Returns {mint: {"pairs": [...]}} or None if the call failed or
+    the source is cooling down (callers then fall back to stale cache, the single fetch_dex, or a clear 503).
+    - Majors (SOL, USDC, USDT) stay out: with their huge pair counts they crowd small tokens out of the shared answer.
+    - A mint with no pair in the answer is left out, so the caller asks for it alone instead of reporting a false 404.
+    """
+    rest = [m for m in mints if m not in MAJOR_ASSETS]
+    if not rest:
+        return {}
+    if _DEX_COOLDOWN["until"] > time.time():
+        return None
+    out: Dict[str, dict] = {m: {"pairs": []} for m in rest}
+    t0 = time.time()
+    try:
+        resp = await client.get(DEX_URL.format(mint=",".join(rest)))
+        if resp.status_code == 429:
+            _DEX_COOLDOWN["until"] = time.time() + _retry_after_seconds(resp)
+            src_log("dexscreener", False, t0)
+            return None
+        resp.raise_for_status()
+        pairs = resp.json().get("pairs") or []
+        src_log("dexscreener", True, t0)
+    except (httpx.HTTPError, ValueError):
+        src_log("dexscreener", False, t0)
+        return None
+    # A token belongs to a pair as its BASE. Matching the quote side too would push every memecoin/SOL pair into
+    # SOL's list, so quote is only a fallback for tokens with no base match.
+    for p in pairs:
+        base = (p.get("baseToken") or {}).get("address")
+        if base in out:
+            out[base]["pairs"].append(p)
+    no_base = {m for m, v in out.items() if not v["pairs"]}
+    for p in pairs:
+        quote = (p.get("quoteToken") or {}).get("address")
+        if quote in no_base:
+            out[quote]["pairs"].append(p)
+    return {m: v for m, v in out.items() if v["pairs"]}
+
+
+# ---------- Homepage: retry button when 429/503 ----------
+_old_get = """if(!res.ok){result.innerHTML='<div style="color:#ff4d6d">Error: '+esc(data.detail||'Failed')+'</div>'}"""
+
+_new_get = """if(!res.ok){
+  const retry=parseInt(res.headers.get('Retry-After')||'30',10);
+  let left=retry;
+  result.innerHTML='<div style="color:#ff4d6d;margin-bottom:10px">Error: '+esc(data.detail||'Failed')+'</div>'
+    +'<button id="retryBtn" disabled style="margin-top:4px;padding:8px 16px;border-radius:8px;border:none;background:linear-gradient(90deg,#7c5cff,#00d4aa);color:#fff;font-weight:600;cursor:pointer">Retry in '+left+'s</button>';
+  const rb=document.getElementById('retryBtn');
+  const t=setInterval(()=>{
+    left--;
+    if(left<=0){clearInterval(t);rb.textContent='Retry now';rb.disabled=false;rb.onclick=()=>getSignal()}
+    else{rb.textContent='Retry in '+left+'s';rb.disabled=true}
+  },1000);
+}"""
+
+if _old_get in HOME_HTML:
+    HOME_HTML = HOME_HTML.replace(_old_get, _new_get)
+elif "retryBtn" not in HOME_HTML:
+    print("[part19] warning: homepage retry button was NOT applied (the original JS line has changed)")
